@@ -20,10 +20,9 @@ The application does **not** calculate payroll. It has three jobs:
 ## 2. Monthly Workflow
 
 ```
-                                       ┌──▶ salaries_2026-10.kpc         (due e.g. 12th)
-Pohoda ──ABO──▶ import ─▶ classification ─┼──▶ social-insurance_2026-10.kpc (due e.g. 20th)
-                          and checks      ├──▶ taxes_2026-10.kpc            (due e.g. 20th)
-                                       └──▶ other_2026-10.kpc            (…)
+                                          ┌──▶ salaries_2026-10_due-2026-11-12.kpc
+Pohoda ──ABO──▶ import ─▶ classification ─┤
+                          and checks      └──▶ deductions_2026-10_due-2026-11-20.kpc
                                                    │
                                                    ▼  manual upload to ČSOB CEB / BusinessBanking
 
@@ -45,19 +44,15 @@ UHL1...                      header (date, client name and number)
 The application reads the payer account and all items (payee account, amount, VS, KS, SS, message) and validates the structure and totals. The exact format and encoding of the Pohoda export will be verified against an anonymized sample.
 
 ### 2.2 Classification into Groups
-**Payment groups** are defined in settings. Each group has a name, a default due day and rules that assign items to it.
+There are two fixed groups, each with its own due date rule in settings:
 
-| Group (example) | Assignment rule | Default due day |
+| Group | Assignment rule | Default due day |
 |---|---|---|
-| **Salaries** | payee account belongs to an employee in the registry | 12th of the month |
-| **Social insurance** | payee account = ČSSZ / OSSZ account | 20th |
-| **Health insurance** | payee account = health insurer account (VZP, ZPMV, OZP, …) | 20th |
-| **Taxes** | payee account = tax office account | 20th |
-| **Other** | everything else (garnishments, pension savings, …) | manual |
+| **Salaries** | payee account belongs to an active employee and is valid on the import date | 12th of the following month |
+| **Deductions** | payee account is in the list of deduction accounts (ČSSZ, health insurers, tax office, garnishment administrators, …) | 20th of the following month |
 
-- Rules are primarily a **list of payee account numbers**, optionally combined with KS, VS prefix or message text.
-- Employee payments are recognized automatically from the employee registry. Institution accounts are entered once and reused every month.
-- An item not matched by any rule lands in *Other* and must be assigned manually before export.
+- Employee payments are recognized automatically from the employee registry. Deduction accounts are entered once in settings and reused every month.
+- An item matching neither group is *unassigned* and blocks the batch until it is manually assigned. An unknown account can be assigned to deductions, but never forced into salaries.
 - Each group's due date is prefilled from settings and can be overridden for a given month. A date falling on a weekend or Czech public holiday is moved to the nearest business day (configurable: forward or backward).
 
 ### 2.3 Checks
@@ -78,7 +73,7 @@ Key invariant: **the sum of all output files must exactly equal the input.** No 
 ### 2.4 Output for ČSOB
 - One **separate ABO file** per non-empty group, with that group's due date.
 - File name contains group, period and due date, e.g. `salaries_2026-10_due-2026-11-12.kpc`.
-- Download individually or all at once as a ZIP.
+- Download from the batch page.
 - Each file shows its item count and total for easy comparison with what ČSOB displays after upload.
 - The original Pohoda file and the generated files are archived.
 - Each file can be marked as *uploaded to bank*, so it is clear what has been processed.
@@ -146,19 +141,21 @@ Region **eu-central-1 (Frankfurt)**.
 
 ## 5. Data Model (DynamoDB, single-table)
 
-| Entity | PK / SK | Attributes |
+Every record is stored as `pk` / `sk` plus a JSON `data` attribute. With at most a
+few hundred records there is no need for typed attributes or secondary indexes;
+collections are read with a single query on `pk`.
+
+| pk | sk | Contents |
 |---|---|---|
-| User | `USER#<login>` / `PROFILE` | password hash, role, failed attempts, locked until |
-| Employee | `EMP#<id>` / `PROFILE` | employee number, name, e-mail, active |
-| Employee account | `EMP#<id>` / `ACC#<from>` | prefix, number, bank code, valid from / to |
-| Account index | `ACCNUM#<account>` / `EMP#<id>` | look up employee by account |
-| Payment group | `GROUP#<id>` / `META` | name, order, due day, holiday shift direction |
-| Rule | `GROUP#<id>` / `RULE#<n>` | type (account / KS / VS prefix / text), value, label (e.g. "VZP") |
-| Batch | `BATCH#<YYYY-MM>` / `META` | status, payer account, input total, input S3 key |
-| Item | `BATCH#<YYYY-MM>` / `ITEM#<n>` | account, amount, VS/KS/SS, message, group, employee, errors |
-| Output file | `BATCH#<YYYY-MM>` / `OUT#<group>` | due date, count, total, S3 key, uploaded to bank (yes/no, when) |
-| Payslip | `BATCH#<YYYY-MM>` / `SLIP#<emp>` | S3 key, delivery status, time, error |
-| Audit | `AUDIT#<YYYY-MM>` / `<time>#<id>` | user, action, object, detail |
+| `USERS` | `<username>` | password hash, role, failed attempts, locked until |
+| `EMPLOYEES` | `<employee id>` | employee number, name, e-mail, active, accounts with validity (history is kept) |
+| `SETTINGS` | `MAIN` | company account, deduction accounts, due date rules, thresholds, e-mail template |
+| `BATCHES` | `<YYYY-MM>` | input file, manual assignments, due dates, generated outputs (uploaded to bank yes/no), salaries per employee |
+| `PAYSLIPS#<YYYY-MM>` | `<employee id>` | S3 key, delivery status, time, error |
+| `AUDIT#<YYYY-MM>` | `<timestamp>#<id>` | user, action, detail |
+
+The classification of a batch is not stored: it is recomputed from the archived
+ABO file on every request, so it always reflects the current registry and settings.
 
 ## 6. Screens
 
