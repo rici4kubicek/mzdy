@@ -5,32 +5,32 @@
 | | |
 |---|---|
 | Účetní / mzdový systém | **Pohoda** |
-| Vstup plateb | **ABO soubor** (příkaz k úhradě exportovaný z Pohody) |
-| Banka | **ČSOB** |
+| Vstup plateb | **jeden ABO soubor** (příkaz k úhradě exportovaný z Pohody: mzdy, pojistné, daně, …) |
+| Banka | **ČSOB**, soubory se do bankovnictví nahrávají ručně |
 | Počet zaměstnanců | do 20 |
 | Hosting | **AWS, serverless** |
+| Zabezpečení | jednoduché přihlášení jménem a heslem (bez Cognito) |
 
-Aplikace mzdy **nepočítá**. Má dva úkoly:
+Aplikace mzdy **nepočítá**. Má tři úkoly:
 
-1. **Kontrola výplat:** načte ABO soubor z Pohody a každou platbu ověří proti číselníku zaměstnanců a jejich účtů. Hlídá hlavně podvržený nebo změněný účet. Po kontrole vydá ABO soubor k nahrání do ČSOB.
-2. **Výplatní pásky:** nahrané pásky přiřadí zaměstnancům a rozešle je e-mailem jako zaheslovaná PDF.
+1. **Rozdělení plateb:** jeden ABO soubor z Pohody rozdělí na **více výstupních ABO souborů**, každý s vlastním datem splatnosti. Mzdy tak mohou odejít jiný kalendářní den než pojistné, daně a další odvody.
+2. **Kontrola:** platby zaměstnancům ověří proti číselníku zaměstnanců a jejich účtů. Hlídá hlavně podvržený nebo změněný účet.
+3. **Výplatní pásky:** nahrané pásky přiřadí zaměstnancům a rozešle je e-mailem jako zaheslovaná PDF.
 
-## 2. Uživatelé
-
-- **Administrátor:** nastavení (účet plátce, e-maily, šablony), správa uživatelů.
-- **Mzdová účetní:** správa zaměstnanců a účtů, import ABO, pásky, odeslání.
-- Volitelně **schvalovatel**, pokud má výplaty schvalovat druhá osoba.
-
-Zaměstnanci se do aplikace nepřihlašují. Jsou to jen záznamy v číselníku.
-
-## 3. Proces jednoho mzdového období
+## 2. Proces jednoho mzdového období
 
 ```
-Pohoda ──ABO──▶ 1. Import ABO ─▶ 2. Párování a kontrola ─▶ 3. Schválení ─▶ 4. Stažení ABO ──▶ ČSOB
-Pohoda ──PDF──▶ 5. Nahrání pásek ─▶ 6. Přiřazení ─▶ 7. Odeslání e-mailů ─▶ protokol doručení
+                                  ┌──▶ mzdy_2026-10.abo      (splatnost např. 12.)
+Pohoda ──ABO──▶ import ─▶ roztřídění ─┼──▶ pojistne_2026-10.abo  (splatnost např. 20.)
+                          a kontrola  ├──▶ dane_2026-10.abo      (splatnost např. 20.)
+                                  └──▶ ostatni_2026-10.abo   (…)
+                                              │
+                                              ▼  ruční nahrání do ČSOB CEB / BusinessBanking
+
+Pohoda ──PDF──▶ nahrání pásek ─▶ přiřazení ─▶ odeslání e-mailů ─▶ protokol
 ```
 
-### 3.1 Import ABO souboru
+### 2.1 Import ABO souboru
 ABO (KPC) je textový formát s pevnou strukturou:
 
 ```
@@ -42,134 +42,150 @@ UHL1...                      hlavička (datum, název a číslo klienta)
 5 +                          konec souboru
 ```
 
-Aplikace z něj načte účet plátce, datum splatnosti a položky: účet příjemce, částku, VS, KS, SS a zprávu. Zkontroluje strukturu i to, že součet položek odpovídá hlavičce skupiny. Kódování a drobné odchylky exportu z Pohody ověříme na anonymizovaném vzorku.
+Aplikace z něj načte účet plátce a všechny položky: účet příjemce, částku, VS, KS, SS a zprávu. Zkontroluje strukturu i součty. Přesný formát a kódování exportu z Pohody ověříme na anonymizovaném vzorku.
 
-### 3.2 Párování a kontrola
-Každá položka se spáruje se zaměstnancem **podle čísla účtu příjemce**. Pokud Pohoda plní do VS osobní číslo, použije se jako druhý klíč.
+### 2.2 Roztřídění do skupin
+V nastavení se definují **skupiny plateb**. Každá má název, výchozí den splatnosti a pravidla, podle kterých se do ní položky zařadí.
+
+| Skupina (příklad) | Pravidlo zařazení | Výchozí splatnost |
+|---|---|---|
+| **Mzdy** | účet příjemce patří zaměstnanci z číselníku | 12. den v měsíci |
+| **Sociální pojištění** | účet příjemce = účet ČSSZ / OSSZ | 20. den |
+| **Zdravotní pojištění** | účet příjemce = účet zdravotní pojišťovny (VZP, ZPMV, OZP, …) | 20. den |
+| **Daně** | účet příjemce = účet finančního úřadu | 20. den |
+| **Ostatní** | vše ostatní (exekuce, penzijní spoření, …) | ručně |
+
+- Pravidla se zapisují hlavně jako **seznam čísel účtů příjemců**. Volitelně je jde doplnit o KS, VS (prefix) nebo text zprávy.
+- Platby zaměstnancům se poznají automaticky podle číselníku zaměstnanců. Účty institucí se do pravidel zadají jednou a pak platí každý měsíc.
+- Položka, kterou žádné pravidlo nezachytí, spadne do skupiny *Ostatní* a před exportem ji musí uživatel ručně zařadit.
+- Datum splatnosti každé skupiny se předvyplní z nastavení a jde ho pro konkrétní měsíc změnit. Když vychází na víkend nebo státní svátek, aplikace ho posune na nejbližší pracovní den (nastavitelně dopředu nebo dozadu).
+
+### 2.3 Kontroly
 
 | Kontrola | Výsledek |
 |---|---|
-| Účet není v číselníku u žádného zaměstnance | **blokující chyba** (možný podvod nebo překlep) |
-| Účet patří jinému zaměstnanci než VS / osobní číslo | blokující chyba |
-| Účet byl v číselníku změněn v posledních N dnech | upozornění |
+| Součet položek neodpovídá hlavičce ABO | **blokující chyba** |
 | Neplatné číslo účtu (modulo 11, kód banky dle ČNB) | blokující chyba |
-| Částka se liší o víc než X % oproti minulému měsíci | upozornění |
-| Aktivní zaměstnanec v souboru chybí | upozornění |
-| Účet plátce v souboru neodpovídá nastavenému firemnímu účtu ČSOB | blokující chyba |
+| Účet plátce neodpovídá nastavenému firemnímu účtu ČSOB | blokující chyba |
+| Položka nezařazená do žádné skupiny | blokující chyba (nutné ruční zařazení) |
+| Účet zaměstnance byl v číselníku změněn v posledních N dnech | upozornění |
+| Platba ve skupině „Mzdy“ jde na účet, který u zaměstnance už neplatí | blokující chyba |
+| Aktivní zaměstnanec ve mzdách chybí | upozornění |
+| Mzda se liší o víc než X % oproti minulému měsíci | upozornění |
 
-### 3.3 Schválení a výstup pro ČSOB
-- Když dávka nemá žádnou blokující chybu, jde ji schválit. Volitelně ji schvaluje druhá osoba.
-- Výstupem je **ABO soubor pro ČSOB**. Aplikace ho vygeneruje znovu ze zkontrolovaných dat: pevná struktura, kódování a datum splatnosti z nastavení. Do bankovnictví tak jde přesně to, co prošlo kontrolou. Původní soubor z Pohody se archivuje.
-- Soubor se nahraje do **ČSOB CEB / ČSOB BusinessBanking** (import ABO). Možnost otisku souboru (hash) pro kontrolu, že se po stažení nezměnil.
-- Později lze přidat přímé odeslání přes **ČSOB CEB API**, bez ručního nahrávání.
+Důležité: **součet všech výstupních souborů musí přesně odpovídat vstupu**, žádná platba se neztratí ani nezdvojí. Aplikace to zobrazí jako kontrolní součet.
 
-### 3.4 Výplatní pásky
-Pohoda umí pásky vytisknout do PDF. Aplikace podporuje dva vstupy:
-- **Jedno hromadné PDF:** aplikace ho rozdělí po stránkách a každou stránku přiřadí podle textu, který na ní najde (osobní číslo nebo jméno). Páska na dvě stránky se pozná podle toho, že pokračující stránka nemá nové osobní číslo.
-- **ZIP s PDF:** přiřazení podle názvu souboru (např. `1234_novak.pdf`).
+### 2.4 Výstup pro ČSOB
+- Pro každou neprázdnou skupinu se vygeneruje **samostatný ABO soubor** s datem splatnosti dané skupiny.
+- Název souboru obsahuje skupinu, období a datum splatnosti, např. `mzdy_2026-10_splatnost-2026-11-12.kpc`.
+- Stažení po jednom nebo vše najednou jako ZIP.
+- U každého souboru se zobrazí počet plateb a součet, aby šel po nahrání snadno porovnat s tím, co ukáže ČSOB.
+- Původní soubor z Pohody i vygenerované soubory se archivují.
+- Každý soubor jde označit jako *nahráno do banky*, takže je vidět, co už bylo zpracováno.
 
-Před odesláním je povinný náhled přiřazení: kdo pásku má, kdo ne a co zůstalo nepřiřazené.
+### 2.5 Výplatní pásky
+- **Hromadné PDF z Pohody:** aplikace ho rozdělí po stránkách a každou stránku přiřadí podle osobního čísla nebo jména, které na ní najde. Pokračující stránka bez nového osobního čísla se připojí k předchozí pásce.
+- Alternativně **ZIP s PDF** s osobním číslem v názvu souboru.
+- Povinný náhled přiřazení před odesláním.
+- Každá páska je PDF **zaheslované** heslem nastaveným u zaměstnance. Heslo se nikdy neposílá e-mailem.
+- Šablona e-mailu s proměnnými `{jmeno}` a `{obdobi}`, odeslání na pozadí, stav každého e-mailu, možnost poslat znovu.
 
-### 3.5 Odeslání
-- Každá páska je **PDF zaheslované** (AES-256) heslem nastaveným u zaměstnance. Heslo se nikdy neposílá e-mailem.
-- Šablona e-mailu s proměnnými `{jmeno}` a `{obdobi}`.
-- Odeslání na pozadí, stav u každého e-mailu (čeká / odesláno / doručeno / chyba), možnost poslat znovu.
+## 3. Zabezpečení (jednoduchá varianta)
+
+Pro 1–3 uživatele stačí vlastní přihlášení. Cognito není potřeba.
+
+- **Uživatelé** jsou uložení v DynamoDB, heslo jako hash (bcrypt). Nového uživatele založí administrátor skriptem z příkazové řádky (`create-user`). Registrace přes web není.
+- **Přihlášení:** po zadání jména a hesla Lambda vydá **podepsaný token** (JWT, platnost např. 8 h) v cookie `HttpOnly; Secure; SameSite=Strict`. Podpisový klíč je v AWS SSM Parameter Store (SecureString).
+- **Ochrana API:** každý požadavek ověří Lambda authorizer (případně middleware přímo v API Lambdě).
+- **Ochrana proti hádání hesla:** po 5 chybných pokusech se účet na 15 minut zablokuje, API Gateway má nastavené omezení počtu požadavků (throttling).
+- **HTTPS** všude (CloudFront).
+- **Data v klidu** šifrují S3 a DynamoDB výchozím šifrováním (bez placeného KMS klíče). S3 bucket je privátní, soubory se stahují a nahrávají přes presigned URL s krátkou platností.
+- **Audit log:** kdo nahrál, změnil účet, vygeneroval soubory nebo odeslal pásky.
+- **Retence:** S3 lifecycle soubory po N měsících smaže.
+- Volitelně později: druhý faktor (TOTP) nebo omezení přístupu na IP adresu kanceláře (AWS WAF).
 
 ## 4. Architektura na AWS (serverless)
 
 ```
-            ┌──────────── CloudFront ────────────┐
- prohlížeč ─┤  /        → S3 (statický frontend) │
-            │  /api/*   → API Gateway (HTTP API) │
-            └──────────────────┬─────────────────┘
-                               │  JWT z Cognito (s MFA)
+            ┌──────────── CloudFront (HTTPS) ────────────┐
+ prohlížeč ─┤  /        → S3 (statický frontend)          │
+            │  /api/*   → API Gateway (HTTP API)          │
+            └──────────────────┬──────────────────────────┘
+                               │  cookie s JWT
                           ┌────▼─────┐
-                          │  Lambda  │  API (Python)
-                          └┬───┬───┬─┘
+                          │  Lambda  │  API (Python): login, zaměstnanci,
+                          └┬───┬───┬─┘  import/rozdělení ABO, pásky
               ┌────────────┘   │   └──────────────┐
          ┌────▼─────┐    ┌─────▼────┐       ┌─────▼────┐
          │ DynamoDB │    │ S3 data  │       │   SQS    │
-         │ (data)   │    │ ABO, PDF │       │ fronta   │
-         └──────────┘    │ SSE-KMS  │       └─────┬────┘
+         └──────────┘    │ ABO, PDF │       └─────┬────┘
                          └──────────┘       ┌─────▼────────┐
-                                            │ Lambda sender│──▶ SES ──▶ zaměstnanec
+                                            │ Lambda sender│──▶ SES ──▶ zaměstnanci
                                             └──────────────┘
 ```
 
 | Služba | Účel |
 |---|---|
 | **S3 + CloudFront** | frontend (React SPA), HTTPS |
-| **Cognito** | přihlášení uživatelů aplikace, povinné MFA (TOTP) |
-| **API Gateway HTTP API + Lambda (Python)** | REST API: zaměstnanci, import ABO, kontrola, generování ABO, pásky |
-| **DynamoDB** (on-demand) | zaměstnanci, účty, dávky, položky, logy. Pro 20 lidí stačí jedna tabulka. |
-| **S3 (privátní bucket, SSE-KMS)** | ABO soubory a PDF pásky; nahrávání přes presigned URL; lifecycle pro automatické mazání |
-| **KMS** | šifrovací klíč pro S3 a citlivá pole (čísla účtů, hesla k PDF) |
-| **SQS + Lambda** | fronta na odesílání e-mailů s opakováním a dead-letter queue |
-| **SES** | odesílání e-mailů z vlastní domény (DKIM, SPF, DMARC) |
-| **CloudWatch** | logy, alarm na chyby odeslání |
-| **AWS CDK** | celá infrastruktura jako kód, nasazení jedním příkazem |
+| **API Gateway HTTP API + Lambda (Python)** | celé API včetně přihlášení |
+| **DynamoDB** (on-demand) | uživatelé, zaměstnanci, účty, skupiny a pravidla, dávky, logy |
+| **S3 (privátní)** | ABO soubory, PDF pásky |
+| **SSM Parameter Store** | podpisový klíč JWT, nastavení |
+| **SQS + Lambda** | fronta na odesílání e-mailů (opakování, dead-letter queue) |
+| **SES** | e-maily z vlastní domény (DKIM, SPF, DMARC) |
+| **CloudWatch** | logy, alarm na chyby |
+| **AWS CDK (Python)** | celá infrastruktura jako kód |
 
-Region **eu-central-1 (Frankfurt)**, data zůstávají v EU (GDPR).
-
-**Odhad nákladů:** při 20 zaměstnancích a jednom běhu měsíčně se většina služeb vejde do free tieru. Reálně jde o **cca 1–3 USD měsíčně**, hlavně KMS klíč (1 USD) a doména.
+Region **eu-central-1 (Frankfurt)**.
+**Odhad nákladů:** při tomto objemu se vše vejde do free tieru nebo se mu blíží, reálně **do 1 USD měsíčně** (plus doména).
 
 ### Technologie
-- **Backend:** Python 3.12 v Lambdě. `pypdf` pro dělení a šifrování PDF, `pdfplumber` pro čtení textu, vlastní parser a generátor ABO.
-- **Frontend:** React + TypeScript (Vite), přihlášení přes Cognito (AWS Amplify Auth).
-- **IaC:** AWS CDK (Python).
-- **CI/CD:** GitHub Actions s nasazením do AWS přes OIDC, bez uložených klíčů.
+- **Backend:** Python 3.12. Vlastní parser a generátor ABO, `pypdf` (dělení a šifrování PDF), `pdfplumber` (čtení textu), `bcrypt`, `PyJWT`, knihovna `holidays` (české svátky pro posun splatnosti).
+- **Frontend:** React + TypeScript (Vite).
+- **IaC:** AWS CDK. **CI/CD:** GitHub Actions s nasazením přes OIDC.
 
 ## 5. Datový model (DynamoDB, single-table)
 
-| Entita | Klíč (PK / SK) | Atributy |
+| Entita | PK / SK | Atributy |
 |---|---|---|
-| Zaměstnanec | `EMP#<id>` / `PROFILE` | osobní číslo, jméno, e-mail, heslo k PDF (šifrovaně), aktivní |
-| Účet | `EMP#<id>` / `ACC#<od>` | předčíslí, číslo, kód banky, platný od / do |
-| Index účtu | `ACCNUM#<účet>` / `EMP#<id>` | rychlé vyhledání zaměstnance podle účtu |
-| Dávka | `BATCH#<YYYY-MM>` / `META` | stav, účet plátce, splatnost, součet, S3 klíče souborů, kdo / kdy schválil |
-| Položka | `BATCH#<YYYY-MM>` / `ITEM#<n>` | účet, částka, VS/KS/SS, zaměstnanec, chyby, upozornění |
+| Uživatel | `USER#<login>` / `PROFILE` | hash hesla, role, počet chybných pokusů, blokace do |
+| Zaměstnanec | `EMP#<id>` / `PROFILE` | osobní číslo, jméno, e-mail, heslo k PDF, aktivní |
+| Účet zaměstnance | `EMP#<id>` / `ACC#<od>` | předčíslí, číslo, kód banky, platný od / do |
+| Index účtu | `ACCNUM#<účet>` / `EMP#<id>` | vyhledání zaměstnance podle účtu |
+| Skupina plateb | `GROUP#<id>` / `META` | název, pořadí, den splatnosti, posun při svátku |
+| Pravidlo | `GROUP#<id>` / `RULE#<n>` | typ (účet / KS / VS prefix / text), hodnota, popis (např. „VZP“) |
+| Dávka | `BATCH#<YYYY-MM>` / `META` | stav, účet plátce, součet vstupu, S3 klíč vstupu |
+| Položka | `BATCH#<YYYY-MM>` / `ITEM#<n>` | účet, částka, VS/KS/SS, zpráva, skupina, zaměstnanec, chyby |
+| Výstupní soubor | `BATCH#<YYYY-MM>` / `OUT#<skupina>` | splatnost, počet, součet, S3 klíč, nahráno do banky (ano/ne, kdy) |
 | Páska | `BATCH#<YYYY-MM>` / `SLIP#<emp>` | S3 klíč, stav odeslání, čas, chyba |
-| Audit | `AUDIT#<YYYY-MM>` / `<čas>#<id>` | uživatel, akce, objekt, před / po |
-
-Změna účtu nepřepisuje historii. Nový účet dostane platnost od data, takže minulé dávky zůstanou dohledatelné.
+| Audit | `AUDIT#<YYYY-MM>` / `<čas>#<id>` | uživatel, akce, objekt, detail |
 
 ## 6. Obrazovky
 
-1. **Přehled:** období a jejich stav
-2. **Zaměstnanci:** seznam, detail s účty a historií změn
-3. **Nové období:** průvodce: nahrát ABO → výsledek kontroly → schválit → stáhnout ABO pro ČSOB
-4. **Pásky:** nahrání PDF, tabulka přiřazení s náhledem, *Odeslat*
-5. **Nastavení:** firemní účet ČSOB, šablona e-mailu, odesílací adresa, prahy upozornění
-6. **Audit log**
+1. **Přihlášení**
+2. **Přehled:** období, stav dávky, které soubory už jsou nahrané v bance, stav pásek
+3. **Nové období:** průvodce: nahrát ABO → roztřídění do skupin (tabulka po skupinách, ruční přeřazení, úprava dat splatnosti) → kontroly → stažení výstupních souborů
+4. **Pásky:** nahrání PDF, přiřazení s náhledem, odeslání
+5. **Zaměstnanci:** seznam, detail s účty a historií
+6. **Nastavení:** firemní účet ČSOB, skupiny plateb a pravidla, šablona e-mailu, prahy upozornění
+7. **Audit log**
 
-## 7. Bezpečnost
-
-- Cognito s povinným MFA. Registrace jen přes pozvánku od administrátora.
-- Privátní S3 s blokovaným veřejným přístupem, šifrování KMS, presigned URL s krátkou platností.
-- Citlivá pole v DynamoDB šifrovaná přes KMS.
-- Audit log každé změny účtu a každého odeslání; volitelně e-mailové upozornění administrátorovi při změně účtu.
-- Retence: soubory se po N měsících automaticky smažou (S3 lifecycle).
-- Lambdy mají přístup jen k tomu, co nutně potřebují (least-privilege IAM).
-
-## 8. Fáze vývoje
+## 7. Fáze vývoje
 
 **Fáze 1 (MVP)**
-- CDK infrastruktura, Cognito přihlášení
-- číselník zaměstnanců a účtů
-- import ABO z Pohody, párování, kontroly, vygenerování ABO pro ČSOB
-- nahrání hromadného PDF s pásky, rozdělení, přiřazení, zaheslování, odeslání přes SES
+- CDK infrastruktura, přihlášení
+- číselník zaměstnanců, skupiny plateb a pravidla
+- import ABO, roztřídění, kontroly, generování více ABO souborů s různou splatností
+- pásky: rozdělení PDF, přiřazení, zaheslování, odeslání přes SES
 - audit log
 
 **Fáze 2**
-- schvalování druhou osobou, porovnání s minulým měsícem, upozornění na změny účtů, retence
+- porovnání s minulým měsícem, upozornění na změny účtů, retence, volitelné TOTP
 
-**Fáze 3**
-- přímé odeslání plateb přes ČSOB CEB API
+## 8. Co potřebuji pro implementaci
 
-## 9. Co potřebuji pro implementaci
-
-1. **Anonymizovaný ABO soubor z Pohody** (stačí smyšlené účty a částky), abych ověřil přesný formát a kódování.
-2. **Ukázku výplatní pásky z Pohody** (PDF, anonymizovanou), abych ověřil, jak z ní číst osobní číslo nebo jméno.
-3. **Doménu** pro odesílání e-mailů a přístup k jejímu DNS (kvůli SES).
-4. Čím se zaměstnanci budou otevírat PDF: vlastní heslo, nebo např. datum narození?
-5. Plní Pohoda do VS u mezd osobní číslo?
+1. **Anonymizovaný ABO soubor z Pohody** se všemi typy plateb (mzdy, pojistné, daně), stačí smyšlené účty a částky.
+2. **Seznam skupin**, které chcete, a jejich dny splatnosti: stačí mzdy / odvody, nebo jemněji?
+3. **Ukázku výplatní pásky z Pohody** (PDF, anonymizovanou).
+4. **Doménu** pro odesílání e-mailů a přístup k DNS.
+5. Heslo k PDF pro zaměstnance: vlastní, nebo např. datum narození?
