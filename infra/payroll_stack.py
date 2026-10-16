@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import jsii
@@ -38,21 +38,34 @@ JWT_SECRET_PARAM = "/payroll/jwt-secret"
 RUNTIME = lambda_.Runtime.PYTHON_3_12
 
 
-@jsii.implements(ILocalBundling)
-class _LocalPythonBundling:
-    """Bundle the backend with pip on the host so that Docker is not required.
+def _bundle_commands(source: str, output: str) -> str:
+    """Install the locked runtime dependencies and the backend package with uv.
 
-    All runtime dependencies are pure Python, so no platform-specific wheels are needed.
+    All runtime dependencies are pure Python; the platform flags only make sure uv
+    resolves wheels for the Lambda runtime rather than for the build host.
     """
+    target = (
+        f"--target {output} --no-compile --python-version 3.12 "
+        "--python-platform aarch64-manylinux2014"
+    )
+    return " && ".join(
+        [
+            f"cd {source}",
+            "uv export --frozen --no-dev --no-emit-project --quiet -o /tmp/payroll-requirements.txt",
+            f"uv pip install --quiet {target} -r /tmp/payroll-requirements.txt",
+            f"uv pip install --quiet --no-deps {target} .",
+        ]
+    )
+
+
+@jsii.implements(ILocalBundling)
+class _LocalUvBundling:
+    """Bundle the backend with uv on the host so that Docker is not required."""
 
     def try_bundle(self, output_dir: str, *, image=None, **_kwargs) -> bool:
-        subprocess.run(
-            [
-                sys.executable, "-m", "pip", "install", "--quiet", "--no-compile",
-                "--target", output_dir, str(BACKEND),
-            ],
-            check=True,
-        )  # fmt: skip
+        if shutil.which("uv") is None:
+            return False
+        subprocess.run(["bash", "-c", _bundle_commands(str(BACKEND), output_dir)], check=True)
         return True
 
 
@@ -62,8 +75,13 @@ def _backend_code() -> lambda_.Code:
         exclude=[".venv", "tests", "**/__pycache__", ".pytest_cache", ".ruff_cache", "build"],
         bundling=BundlingOptions(
             image=DockerImage.from_registry(RUNTIME.bundling_image.image),
-            command=["bash", "-c", "pip install --no-compile -t /asset-output /asset-input"],
-            local=_LocalPythonBundling(),
+            command=[
+                "bash",
+                "-c",
+                "pip install --quiet uv && "
+                + _bundle_commands("/asset-input", "/asset-output"),
+            ],
+            local=_LocalUvBundling(),
         ),
     )
 

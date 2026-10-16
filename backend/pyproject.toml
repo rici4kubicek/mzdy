@@ -8,10 +8,10 @@ dependencies = [
     "PyJWT>=2.8",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
     "boto3",
-    "moto[dynamodb,s3,sqs,ses]>=5.0",
+    "moto[dynamodb,s3,sqs,ses,server]>=5.0",
     "pytest>=8.0",
     "ruff",
 ]

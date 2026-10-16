@@ -1,5 +1,5 @@
 {
-  "app": ".venv/bin/python app.py",
+  "app": "uv run --frozen python app.py",
   "context": {
     "retentionDays": 730,
     "senderDomain": ""

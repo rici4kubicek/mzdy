@@ -49,17 +49,19 @@ or Czech public holiday. Both are configurable and can be overridden per period.
 
 ## Local development
 
+Python dependencies are managed with [uv](https://docs.astral.sh/uv/) (`pyproject.toml` +
+`uv.lock` in `backend/` and `infra/`).
+
 ```bash
 # backend tests
 cd backend
-python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest
-.venv/bin/ruff check src tests && .venv/bin/ruff format --check src tests
+uv sync
+uv run pytest
+uv run ruff check src tests && uv run ruff format --check src tests
 
 # run the whole app locally against emulated AWS (moto), no AWS account needed
 (cd ../frontend && npm ci && npm run build)
-.venv/bin/pip install "moto[server]"
-.venv/bin/python devserver.py
+uv run python devserver.py
 # open http://localhost:8000 and log in as admin / admin-password
 ```
 
@@ -68,7 +70,7 @@ For frontend work with hot reload, run `devserver.py` and in another terminal
 
 ## Deployment to AWS
 
-Prerequisites: AWS CLI configured for the target account, Node.js 22, Python 3.12.
+Prerequisites: AWS CLI configured for the target account, Node.js 22, uv.
 
 ```bash
 # once per account/region
@@ -85,7 +87,7 @@ The stack outputs the application URL, the DynamoDB table and the data bucket.
 ```bash
 cd backend
 TABLE_NAME=<TableName output> BUCKET_NAME=<DataBucketName output> AWS_REGION=eu-central-1 \
-  .venv/bin/python -m payroll.cli create-user ucetni --role admin
+  uv run python -m payroll.cli create-user ucetni --role admin
 ```
 
 Running the same command again resets the password.

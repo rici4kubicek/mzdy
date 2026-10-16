@@ -3,7 +3,7 @@
 #
 #   AWS_PROFILE=payroll ./scripts/deploy.sh [-c senderDomain=firma.cz]
 #
-# Extra arguments are passed to `cdk deploy`.
+# Requires uv, Node.js 22 and the AWS CLI. Extra arguments are passed to `cdk deploy`.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -21,6 +21,5 @@ fi
 (cd frontend && npm ci && npm run build)
 
 cd infra
-[ -d .venv ] || python3 -m venv .venv
-.venv/bin/pip install -q -r requirements.txt
+uv sync --frozen
 npx --yes aws-cdk@2.1145.0 deploy Payroll --require-approval never "$@"

@@ -1,6 +1,6 @@
 """Run the whole application locally against an in-memory AWS emulation (moto).
 
-    .venv/bin/python devserver.py   # http://localhost:8000, "admin" / "admin-password"
+    uv run python devserver.py   # http://localhost:8000, "admin" / "admin-password"
 
 Serves the built frontend from ../frontend/dist and the API under /api. E-mails
 are not delivered; the mailer runs against the emulated SES. Data is lost on exit.
