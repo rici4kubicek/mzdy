@@ -9,3 +9,4 @@ build/
 cdk.out/
 .env
 *.egg-info/
+*.tsbuildinfo
