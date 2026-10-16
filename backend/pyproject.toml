@@ -1,0 +1,35 @@
+[project]
+name = "payroll"
+version = "0.1.0"
+description = "Payroll payment splitting and payslip delivery"
+requires-python = ">=3.12"
+dependencies = [
+    "pypdf>=5.0",
+    "PyJWT>=2.8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "boto3",
+    "moto[dynamodb,s3,sqs,ses]>=5.0",
+    "pytest>=8.0",
+    "ruff",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
