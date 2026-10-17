@@ -48,7 +48,7 @@ Every data line is assigned by payee account number + bank code to one of three 
 
 | Group | Assignment rule | Due day | Comment written to the line |
 |---|---|---|---|
-| **Salaries** (`15.`) | account belongs to an active employee and is valid on the import date | 15th | `AV: Mzda MMYY NP: First Last` (e.g. `AV: Mzda 0426 NP: Jan Novák`) |
+| **Salaries** (`15.`) | account belongs to an active employee and is valid on the import date | 15th | `AV: Mzda MMYY First Last NP: Mzda MMYY First Last` (e.g. `AV: Mzda 0426 Jan Novák NP: Mzda 0426 Jan Novák`) |
 | **Deductions** (`20.`) | account is in the list of deduction accounts (VZP, PSSZ, tax office, …) | 20th | `NP: <label>` (e.g. `NP: VZP`) |
 | **Pension savings** (`25.`) | account is in the list of pension accounts | 25th | `NP: <Surname> důch. připojištění` |
 

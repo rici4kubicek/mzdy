@@ -55,8 +55,8 @@ def test_classifies_three_groups(sample_abo, employees, settings):
 def test_comments(sample_abo, employees, settings):
     c = run(sample_abo, employees, settings)
     assert [i.comment for i in c.items] == [
-        "AV: Mzda 1026 NP: Jan Novák",
-        "AV: Mzda 1026 NP: Eva Svobodová",
+        "AV: Mzda 1026 Jan Novák NP: Mzda 1026 Jan Novák",
+        "AV: Mzda 1026 Eva Svobodová NP: Mzda 1026 Eva Svobodová",
         "NP: VZP",
         "NP: ČSSZ",
         "NP: Finanční úřad",
@@ -205,7 +205,8 @@ def test_split_produces_one_file_per_group(sample_abo, employees, settings):
         "2 000000-1000000005 00000005700000 131126",
     ]
     assert salaries[3] == (
-        "000000-1000000013 000003200000 0000001001 08000000 0000000000 AV: Mzda 1026 NP: Jan Novak"
+        "000000-1000000013 000003200000 0000001001 08000000 0000000000 "
+        "AV: Mzda 1026 Jan Novak NP: Mzda 1026 Jan Novak"
     )
     assert salaries[-3:] == ["3 +", "5 +", ""]
     pension = outputs[Group.PENSION].decode("ascii")

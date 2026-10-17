@@ -197,7 +197,7 @@ def test_full_salary_flow(client, aws, sample_abo):
     assert c["totals"]["salaries"] == {"count": 2, "amount": 5_700_000}
     assert c["totals"]["deductions"] == {"count": 3, "amount": 1_850_000}
     assert c["totals"]["pension"] == {"count": 2, "amount": 250_000}
-    assert c["items"][0]["comment"] == "AV: Mzda 1026 NP: Jan Novák"
+    assert c["items"][0]["comment"] == "AV: Mzda 1026 Jan Novák NP: Mzda 1026 Jan Novák"
     assert body["batch"]["due_dates"] == {
         "salaries": "2026-11-13",
         "deductions": "2026-11-20",

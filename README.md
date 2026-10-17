@@ -36,7 +36,7 @@ Pohoda ──PDF──▶ split per employee ─▶ preview ─▶ SQS ─▶ SE
 Classification by payee account + bank code:
 
 * account of an active employee (valid on the import date) → **salaries**,
-  comment `AV: Mzda MMYY NP: First Last`
+  comment `AV: Mzda MMYY First Last NP: Mzda MMYY First Last`
 * account in *Settings → Deduction accounts* → **deductions**, comment `NP: <label>`
 * account in *Settings → Pension accounts* → **pension savings**, comment
   `NP: <Surname> důch. připojištění`; a pension account shared by several

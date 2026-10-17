@@ -106,7 +106,8 @@ def period_code(period: str) -> str:
 def payment_comment(group: Group | None, period: str, label: str, original: str) -> str:
     """Message written to the output line for a payment of the given group."""
     if group is Group.SALARIES:
-        return f"AV: Mzda {period_code(period)} NP: {label}"
+        text = f"Mzda {period_code(period)} {label}"
+        return f"AV: {text} NP: {text}"
     if group is Group.PENSION and label:
         return f"NP: {label} důch. připojištění"
     if group in (Group.DEDUCTIONS, Group.PENSION):
