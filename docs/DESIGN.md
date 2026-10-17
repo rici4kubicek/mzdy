@@ -20,9 +20,9 @@ The application does **not** calculate payroll. It has three jobs:
 ## 2. Monthly Workflow
 
 ```
-                                          ┌──▶ salaries_2026-10_due-2026-11-12.kpc
-Pohoda ──ABO──▶ import ─▶ classification ─┤
-                          and checks      └──▶ deductions_2026-10_due-2026-11-20.kpc
+                                          ┌──▶ 15_mzdy_2026-04.kpc                    (salaries, due 15 May)
+Pohoda ──ABO──▶ import ─▶ classification ─┼──▶ 20_odvody_2026-04.kpc                  (deductions, due 20 May)
+                          and checks      └──▶ 25_duchodove-pripojisteni_2026-04.kpc  (pension savings, due 25 May)
                                                    │
                                                    ▼  manual upload to ČSOB CEB / BusinessBanking
 
@@ -41,44 +41,56 @@ UHL1...                      header (date, client name and number)
 5 +                          file end
 ```
 
-The application reads the payer account and all items (payee account, amount, VS, KS, SS, message) and validates the structure and totals. The exact format and encoding of the Pohoda export will be verified against an anonymized sample.
+The application reads the payer account and all items (payee account, amount, VS, KS, SS, message), validates the structure and totals, and keeps every original line for the output.
 
 ### 2.2 Classification into Groups
-There are two fixed groups, each with its own due date rule in settings:
+Every data line is assigned by payee account number + bank code to one of three groups:
 
-| Group | Assignment rule | Default due day |
-|---|---|---|
-| **Salaries** | payee account belongs to an active employee and is valid on the import date | 12th of the following month |
-| **Deductions** | payee account is in the list of deduction accounts (ČSSZ, health insurers, tax office, garnishment administrators, …) | 20th of the following month |
+| Group | Assignment rule | Due day | Comment written to the line |
+|---|---|---|---|
+| **Salaries** (`15.`) | account belongs to an active employee and is valid on the import date | 15th | `AV: Mzda MMYY NP: First Last` (e.g. `AV: Mzda 0426 NP: Jan Novák`) |
+| **Deductions** (`20.`) | account is in the list of deduction accounts (VZP, PSSZ, tax office, …) | 20th | `NP: <label>` (e.g. `NP: VZP`) |
+| **Pension savings** (`25.`) | account is in the list of pension accounts | 25th | `NP: <Surname> důch. připojištění` |
 
-- Employee payments are recognized automatically from the employee registry. Deduction accounts are entered once in settings and reused every month.
-- An item matching neither group is *unassigned* and blocks the batch until it is manually assigned. An unknown account can be assigned to deductions, but never forced into salaries.
-- Each group's due date is prefilled from settings and can be overridden for a given month. A date falling on a weekend or Czech public holiday is moved to the nearest business day (configurable: forward or backward).
+- Several employees may save with the same pension fund account (e.g. `27-1840220297/0100`). Such an account is entered once per employee, each with its variable symbol (contract number); the symbol is searched for in any field of the payment line. A payment to a shared pension account containing none of the symbols is a blocking error.
+- An item matching no group is *unassigned* and blocks the batch until it is manually assigned to deductions or pension savings. An unknown account can never be forced into salaries.
+- Comments are transliterated to ASCII in the output (banks reject diacritics in ABO files).
 
-### 2.3 Checks
+### 2.3 Due Dates
+- The due date lies in the month following the payroll month: April 2026 payroll is paid on 15, 20 and 25 May 2026.
+- A date falling on a weekend or Czech public holiday moves to the nearest **previous** business day.
+- Fixed public holidays are hard-coded; Good Friday and Easter Monday are computed for each year from Easter Sunday using Gauss's algorithm.
+- Days, month offset and shift direction are configurable in settings, and each date can be overridden for a given month.
+
+### 2.4 Checks
 
 | Check | Result |
 |---|---|
 | Item total does not match the ABO header | **blocking error** |
-| Invalid account number (mod 11, bank code per ČNB list) | blocking error |
+| Invalid account number (mod 11) | blocking error |
+| Unknown bank code | warning |
 | Payer account differs from the configured company ČSOB account | blocking error |
 | Item not assigned to any group | blocking error (manual assignment required) |
-| Employee account changed in the registry within the last N days | warning |
+| Shared pension account without a matching variable symbol | blocking error |
 | Salary paid to an account no longer valid for the employee | blocking error |
+| Employee account changed in the registry within the last N days | warning |
 | Active employee missing from salaries | warning |
 | Salary differs by more than X % from previous month | warning |
 
-Key invariant: **the sum of all output files must exactly equal the input.** No payment may be lost or duplicated. The application displays this as a control total.
+Key invariant: **the sum of all output files must exactly equal the input.** No payment may be lost or duplicated. Every output file is parsed again after generation and the totals are compared.
 
-### 2.4 Output for ČSOB
-- One **separate ABO file** per non-empty group, with that group's due date.
-- File name contains group, period and due date, e.g. `salaries_2026-10_due-2026-11-12.kpc`.
-- Download from the batch page.
-- Each file shows its item count and total for easy comparison with what ČSOB displays after upload.
-- The original Pohoda file and the generated files are archived.
-- Each file can be marked as *uploaded to bank*, so it is clear what has been processed.
+### 2.5 Output Files
+Each non-empty group produces one ABO file named `<due day>_<group>_<period>.kpc`:
 
-### 2.5 Payslips
+- `UHL` line: copied from the input with the creation date replaced by today;
+- line `1`: copied unchanged;
+- line `2`: copied with the due date replaced (and the total recalculated for the lines in this file, otherwise the bank would reject the file);
+- data lines: copied unchanged except for the comment;
+- closing lines `3 +` and `5 +`.
+
+Each file shows its item count and total for comparison with what ČSOB displays after upload, and can be marked as *uploaded to bank*. Once any file is marked, the batch can no longer be changed.
+
+### 2.6 Payslips
 - **Combined PDF from Pohoda:** split per page, each page matched by the employee number or name found in its text. A continuation page without a new employee number is appended to the previous payslip.
 - Alternatively a **ZIP of PDFs** with the employee number in the file name.
 - Mandatory matching preview before sending.

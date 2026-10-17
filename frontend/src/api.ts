@@ -1,4 +1,4 @@
-export type Group = "salaries" | "deductions";
+export type Group = "salaries" | "deductions" | "pension";
 
 export interface EmployeeAccount {
   account: string;
@@ -25,6 +25,7 @@ export interface DueDateRule {
 export interface Settings {
   payer_account: string;
   deduction_accounts: { account: string; label: string }[];
+  pension_accounts: { account: string; label: string; vs: string }[];
   due_dates: Record<Group, DueDateRule>;
   account_change_warning_days: number;
   salary_change_warning_pct: number;
@@ -70,6 +71,7 @@ export interface ClassifiedItem {
   employee_id: string | null;
   label: string;
   overridden: boolean;
+  comment: string;
 }
 
 export interface Issue {

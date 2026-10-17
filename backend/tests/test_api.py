@@ -122,6 +122,10 @@ def setup_registry(client):
                 {"account": "1000000048/0710", "label": "ČSSZ"},
                 {"account": "1000000056/0710", "label": "Finanční úřad"},
             ],
+            "pension_accounts": [
+                {"account": "27-1840220297/0100", "label": "Dvořák", "vs": "900011111"},
+                {"account": "27-1840220297/0100", "label": "Černý", "vs": "900022222"},
+            ],
             "email_sender": "mzdy@example.com",
         },
     )
@@ -192,7 +196,13 @@ def test_full_salary_flow(client, aws, sample_abo):
     assert c["has_errors"] is False
     assert c["totals"]["salaries"] == {"count": 2, "amount": 5_700_000}
     assert c["totals"]["deductions"] == {"count": 3, "amount": 1_850_000}
-    assert body["batch"]["due_dates"] == {"salaries": "2026-11-12", "deductions": "2026-11-20"}
+    assert c["totals"]["pension"] == {"count": 2, "amount": 250_000}
+    assert c["items"][0]["comment"] == "AV: Mzda 1026 NP: Jan Novák"
+    assert body["batch"]["due_dates"] == {
+        "salaries": "2026-11-13",
+        "deductions": "2026-11-20",
+        "pension": "2026-11-25",
+    }
     assert body["batch"]["status"] == "imported"
 
     status, body = client.put(
@@ -208,8 +218,10 @@ def test_full_salary_flow(client, aws, sample_abo):
     assert status == 200, batch
     assert batch["status"] == "generated"
     outputs = batch["outputs"]
-    assert outputs["salaries"]["filename"] == "salaries_2026-10_due-2026-11-12.kpc"
+    assert outputs["salaries"]["filename"] == "15_mzdy_2026-10.kpc"
+    assert outputs["pension"]["filename"] == "25_duchodove-pripojisteni_2026-10.kpc"
     assert outputs["deductions"]["due_date"] == "2026-11-19"
+    assert outputs["pension"] == {**outputs["pension"], "count": 2, "total": 250_000}
     assert batch["salaries_by_employee"] == {ids[0]: 3_200_000, ids[1]: 2_500_000}
 
     deductions = aws.get_file(outputs["deductions"]["key"]).decode()
@@ -218,9 +230,9 @@ def test_full_salary_flow(client, aws, sample_abo):
     status, body = client.get("/api/batches/2026-10/outputs/salaries/download")
     assert status == 200
     query = parse_qs(urlparse(body["url"]).query)
-    assert "salaries_2026-10" in query["response-content-disposition"][0]
+    assert "15_mzdy_2026-10" in query["response-content-disposition"][0]
 
-    for group in ("salaries", "deductions"):
+    for group in ("salaries", "deductions", "pension"):
         status, batch = client.post(f"/api/batches/2026-10/outputs/{group}/uploaded")
     assert batch["status"] == "uploaded"
 
@@ -320,3 +332,30 @@ def test_mailer_message(employees, settings):
     assert "Jan Novák" in message.get_body(("plain",)).get_content()
     attachment = next(message.iter_attachments())
     assert attachment.get_filename() == "vyplatni-paska-2026-10.pdf"
+
+
+def test_settings_account_conflicts(client):
+    setup_registry(client)
+    status, settings = client.get("/api/settings")
+    shared = settings["pension_accounts"]
+
+    body = {**settings, "pension_accounts": [{**shared[0], "vs": ""}, shared[1]]}
+    status, response = client.put("/api/settings", body)
+    assert status == 400 and "variable symbol" in response["error"]
+
+    body = {
+        **settings,
+        "deduction_accounts": [*settings["deduction_accounts"], {"account": "1000000013/0800"}],
+    }
+    status, response = client.put("/api/settings", body)
+    assert status == 400 and "already belongs to Jan Novák" in response["error"]
+
+    status, response = client.post(
+        "/api/employees",
+        {
+            "number": "1003",
+            "last_name": "X",
+            "accounts": [{"account": "27-1840220297/0100", "valid_from": "2024-01-01"}],
+        },
+    )
+    assert status == 400 and "configured in settings" in response["error"]

@@ -5,7 +5,7 @@ import { api, ApiError, Batch, BatchDetail, ClassifiedItem, fileToBase64, Group 
 import { formatDate, formatDateTime, formatPeriod, groupNames, issueText, money } from "../format";
 import PayslipsSection from "./PayslipsSection";
 
-const GROUPS: Group[] = ["salaries", "deductions"];
+const GROUPS: Group[] = ["salaries", "deductions", "pension"];
 
 export default function BatchPage() {
   const { period = "" } = useParams();
@@ -216,7 +216,9 @@ function Classification({ detail, locked, onOverride, onDueDate }: Classificatio
       <td className="mono">{item.payee}</td>
       <td className="mono">{item.vs}</td>
       <td className="mono">{item.ks}</td>
-      <td>{item.message}</td>
+      <td>
+        {item.comment ? <span className="mono">{item.comment}</span> : <span className="muted">{item.message}</span>}
+      </td>
       <td className="num">{money(item.amount)}</td>
       <td>
         <select
@@ -247,7 +249,7 @@ function Classification({ detail, locked, onOverride, onDueDate }: Classificatio
         <th>Účet</th>
         <th>VS</th>
         <th>KS</th>
-        <th>Zpráva</th>
+        <th>Komentář v souboru</th>
         <th className="num">Částka</th>
         <th>Zařazení</th>
       </tr>

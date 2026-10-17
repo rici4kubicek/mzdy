@@ -3,9 +3,9 @@
 A small serverless web application for a company with up to ~20 employees that
 processes payroll output from **Pohoda** and prepares payments for **ČSOB**:
 
-1. **Splits** the single ABO payment file exported from Pohoda into separate ABO
-   files for **salaries** and **deductions** (insurance, taxes, …), each with its
-   own due date, so salaries can be paid on a different day than deductions.
+1. **Splits** the single ABO payment file exported from Pohoda into three ABO
+   files: **salaries** (due on the 15th), **deductions** (20th) and **pension
+   savings** (25th) of the following month, and writes a comment to every line.
 2. **Verifies** salary payments against the employee registry: a payment to an
    account that is not registered (or no longer valid) for an employee blocks
    the batch.
@@ -27,25 +27,33 @@ in Czech; code and documentation are in English.
 ## How it works
 
 ```
-Pohoda ──ABO──▶ import ─▶ classification + checks ─┬─▶ salaries_YYYY-MM_due-….kpc   ─┐
-                                                   └─▶ deductions_YYYY-MM_due-….kpc ─┴─▶ manual upload to ČSOB
+Pohoda ──ABO──▶ import ─▶ classification + checks ─┬─▶ 15_mzdy_YYYY-MM.kpc                   ─┐
+                                                   ├─▶ 20_odvody_YYYY-MM.kpc                 ─┼─▶ manual upload to ČSOB
+                                                   └─▶ 25_duchodove-pripojisteni_YYYY-MM.kpc ─┘
 Pohoda ──PDF──▶ split per employee ─▶ preview ─▶ SQS ─▶ SES ─▶ employees
 ```
 
-Classification rules:
+Classification by payee account + bank code:
 
-* payee account belongs to an active employee (and is valid on the import date) → **salaries**
-* payee account is listed in *Settings → Deduction accounts* → **deductions**
-* anything else → **unassigned**, must be assigned manually to *deductions* before
-  files can be generated (an unknown account can never be forced into salaries)
+* account of an active employee (valid on the import date) → **salaries**,
+  comment `AV: Mzda MMYY NP: First Last`
+* account in *Settings → Deduction accounts* → **deductions**, comment `NP: <label>`
+* account in *Settings → Pension accounts* → **pension savings**, comment
+  `NP: <Surname> důch. připojištění`; a pension account shared by several
+  employees is told apart by a variable symbol found anywhere on the line
+* anything else → **unassigned**, must be assigned manually before files can be
+  generated (an unknown account can never be forced into salaries)
 
-Each output file is re-parsed after generation, and the sum of all outputs must
-equal the input exactly. Once a file is marked as *uploaded to bank*, the batch
-can no longer be changed.
+Output files copy the input lines: the `UHL` date becomes today, line `1` is kept,
+line `2` gets the group's due date (and its own total), data lines get the comment.
+Each output is re-parsed after generation, and the sum of all outputs must equal
+the input exactly. Once a file is marked as *uploaded to bank*, the batch can no
+longer be changed.
 
-Due dates default to the 12th (salaries) and 20th (deductions) of the month after
-the payroll period, moved to the previous business day when they fall on a weekend
-or Czech public holiday. Both are configurable and can be overridden per period.
+Due dates lie in the month after the payroll period (April payroll → May) and move
+to the previous business day when they fall on a weekend or Czech public holiday
+(fixed holidays are hard-coded, Good Friday and Easter Monday are computed with
+Gauss's Easter algorithm). They are configurable and can be overridden per period.
 
 ## Local development
 

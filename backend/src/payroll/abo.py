@@ -12,6 +12,10 @@ Structure of a file::
 Amounts are in hellers (1/100 CZK). The payer account in the group header is
 optional; some exporters instead put the payer account in front of every item.
 The reader accepts both variants, the writer always produces the first one.
+
+The text after the data fields of an item (``AV:`` message for the payee, ``NP:``
+note, …) is kept as one string. Every parsed record also keeps its original line,
+so that split output files can copy lines from the input unchanged.
 """
 
 from __future__ import annotations
@@ -41,6 +45,7 @@ class AboItem:
     ss: str = ""
     message: str = ""
     payer: AccountNumber | None = None
+    raw: str = field(default="", compare=False)
 
 
 @dataclass(frozen=True)
@@ -49,6 +54,7 @@ class AboGroup:
     total: int
     items: tuple[AboItem, ...]
     payer: AccountNumber | None = None
+    raw: str = field(default="", compare=False)
 
     @property
     def items_total(self) -> int:
@@ -73,6 +79,8 @@ class AboFile:
     groups: tuple[AboGroup, ...]
     file_number: str = "001000"
     file_type: str = PAYMENT_ORDER
+    raw_header: str = field(default="", compare=False)
+    raw_accounting: str = field(default="", compare=False)
 
     @property
     def items(self) -> list[AboItem]:
@@ -88,6 +96,7 @@ class _GroupBuilder:
     due_date: date
     total: int
     payer: AccountNumber | None
+    raw: str
     items: list[AboItem] = field(default_factory=list)
 
 
@@ -146,8 +155,20 @@ def _parse_header(line: str, line_no: int) -> AboHeader:
     )
 
 
+_MESSAGE_MARKERS = (" AV:", " NP:")
+
+
+def split_message(line: str) -> tuple[str, str]:
+    """Split an item line into the data fields and the trailing message text."""
+    positions = [p for p in (line.find(m) for m in _MESSAGE_MARKERS) if p >= 0]
+    if not positions:
+        return line.rstrip(), ""
+    cut = min(positions)
+    return line[:cut].rstrip(), line[cut:].strip()
+
+
 def _parse_item(line: str, line_no: int) -> AboItem:
-    head, sep, message = line.partition(" AV:")
+    head, message = split_message(line)
     tokens = head.split()
     payer = None
     # A dash in the second token means it is an account, i.e. the payer variant.
@@ -165,8 +186,9 @@ def _parse_item(line: str, line_no: int) -> AboItem:
         vs=_symbol(tokens[2], line_no, "variable symbol"),
         ks=bank_ks[4:].lstrip("0"),
         ss=_symbol(tokens[4], line_no, "specific symbol") if len(tokens) == 5 else "",
-        message=message.strip() if sep else "",
+        message=message[3:].strip() if message.startswith("AV:") else message,
         payer=payer,
+        raw=line,
     )
 
 
@@ -182,7 +204,7 @@ def parse(data: bytes | str) -> AboFile:
         raise AboParseError(line_no, "missing UHL1 file header")
     header = _parse_header(first, line_no)
 
-    file_type = bank_code = file_number = None
+    file_type = bank_code = file_number = raw_accounting = None
     groups: list[AboGroup] = []
     current: _GroupBuilder | None = None
     finished = False
@@ -197,6 +219,7 @@ def parse(data: bytes | str) -> AboFile:
             if len(tokens) != 4:
                 raise AboParseError(line_no, "invalid accounting file header")
             file_type, file_number, bank_code = tokens[1], tokens[2], tokens[3]
+            raw_accounting = line
             if file_type != PAYMENT_ORDER:
                 raise AboParseError(line_no, f"unsupported file type {file_type} (expected 1501)")
         elif line.startswith("2 "):
@@ -214,12 +237,19 @@ def parse(data: bytes | str) -> AboFile:
                 due_date=_parse_date(date_token, line_no),
                 total=_parse_int(total_token, line_no, "group total"),
                 payer=payer,
+                raw=line,
             )
         elif line.startswith("3 "):
             if current is None:
                 raise AboParseError(line_no, "group end without group header")
             groups.append(
-                AboGroup(current.due_date, current.total, tuple(current.items), current.payer)
+                AboGroup(
+                    current.due_date,
+                    current.total,
+                    tuple(current.items),
+                    current.payer,
+                    current.raw,
+                )
             )
             current = None
         elif line.startswith("5 "):
@@ -242,6 +272,8 @@ def parse(data: bytes | str) -> AboFile:
         groups=tuple(groups),
         file_number=file_number,
         file_type=file_type,
+        raw_header=first,
+        raw_accounting=raw_accounting,
     )
 
 
@@ -278,3 +310,36 @@ def serialize(abo: AboFile) -> bytes:
         lines.append("3 +")
     lines.append("5 +")
     return (CRLF.join(lines) + CRLF).encode("ascii")
+
+
+def _group_header_line(raw: str, total: int, due_date: date) -> str:
+    """The original group header with the total and due date replaced."""
+    tokens = raw.split()
+    tokens[-2] = str(total).zfill(len(tokens[-2]))
+    tokens[-1] = due_date.strftime("%d%m%y")
+    return " ".join(tokens)
+
+
+def write_subset(
+    source: AboFile,
+    parts: list[tuple[AboGroup, list[tuple[AboItem, str]]]],
+    due_date: date,
+    created: date,
+) -> bytes:
+    """Write a file containing a subset of the source items.
+
+    The UHL header gets ``created`` as its date, the accounting file header is
+    copied unchanged, each group header keeps its payer but gets the new total and
+    ``due_date``. Item lines are copied from the input with their message replaced
+    by the given comment.
+    """
+    lines = [source.raw_header[:4] + created.strftime("%d%m%y") + source.raw_header[10:]]
+    lines.append(source.raw_accounting)
+    for group, entries in parts:
+        lines.append(_group_header_line(group.raw, sum(i.amount for i, _ in entries), due_date))
+        for item, comment in entries:
+            head, _ = split_message(item.raw)
+            lines.append(f"{head} {comment}" if comment else head)
+        lines.append("3 +")
+    lines.append("5 +")
+    return (CRLF.join(to_ascii(line) for line in lines) + CRLF).encode("ascii")

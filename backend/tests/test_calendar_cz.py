@@ -37,3 +37,18 @@ def test_due_date_skips_christmas_and_wraps_year():
 def test_due_date_clamps_to_month_end():
     # 31 Feb -> 28 Feb 2027 (Sunday) -> 26 Feb.
     assert due_date("2027-01", 31, 1, Shift.BACKWARD) == date(2027, 2, 26)
+
+
+def test_easter_gauss_exceptions():
+    assert easter_sunday(1981) == date(1981, 4, 19)
+    assert easter_sunday(1954) == date(1954, 4, 18)
+    assert easter_sunday(2049) == date(2049, 4, 18)
+    assert easter_sunday(2076) == date(2076, 4, 19)
+
+
+def test_payroll_april_due_dates_in_may():
+    # April 2026 payroll: 15 May (Fri), 20 May (Wed), 25 May (Mon).
+    assert due_date("2026-04", 15, 1, Shift.BACKWARD) == date(2026, 5, 15)
+    assert due_date("2026-04", 25, 1, Shift.BACKWARD) == date(2026, 5, 25)
+    # 8 May 2027 is a holiday on Saturday; 15 May 2027 is Saturday -> 14 May.
+    assert due_date("2027-04", 15, 1, Shift.BACKWARD) == date(2027, 5, 14)

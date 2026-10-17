@@ -32,13 +32,23 @@ export default function SettingsPage() {
       form.deduction_accounts.map((k, i) => (i === index ? { ...k, ...patch } : k)),
     );
 
+  const setPension = (index: number, patch: Partial<Settings["pension_accounts"][number]>) =>
+    set(
+      "pension_accounts",
+      form.pension_accounts.map((k, i) => (i === index ? { ...k, ...patch } : k)),
+    );
+
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (!form) return;
     setBusy(true);
     setError("");
     try {
-      const body = { ...form, deduction_accounts: form.deduction_accounts.filter((k) => k.account.trim()) };
+      const body = {
+        ...form,
+        deduction_accounts: form.deduction_accounts.filter((k) => k.account.trim()),
+        pension_accounts: form.pension_accounts.filter((k) => k.account.trim()),
+      };
       setForm(await api.put<Settings>("/settings", body));
       setSaved(true);
     } catch (e) {
@@ -163,6 +173,69 @@ export default function SettingsPage() {
         <button
           type="button"
           onClick={() => set("deduction_accounts", [...form.deduction_accounts, { account: "", label: "" }])}
+        >
+          Přidat účet
+        </button>
+      </section>
+
+      <section className="card">
+        <h2>Účty důchodového připojištění</h2>
+        <p className="muted">
+          Platby na tyto účty se zařadí do souboru důchodového připojištění s komentářem „NP: Příjmení důch.
+          připojištění“. Spoří-li více zaměstnanců u stejného účtu, zadejte účet vícekrát a u každého variabilní
+          symbol (číslo smlouvy) – hledá se v libovolném poli platby.
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>Číslo účtu</th>
+              <th>Variabilní symbol</th>
+              <th>Příjmení</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {form.pension_accounts.map((k, i) => (
+              <tr key={i}>
+                <td>
+                  <input
+                    className="mono"
+                    value={k.account}
+                    placeholder="předčíslí-číslo/banka"
+                    onChange={(e) => setPension(i, { account: e.target.value })}
+                  />
+                </td>
+                <td>
+                  <input
+                    className="mono"
+                    value={k.vs}
+                    placeholder="nepovinné"
+                    onChange={(e) => setPension(i, { vs: e.target.value })}
+                  />
+                </td>
+                <td>
+                  <input value={k.label} placeholder="např. Novák" onChange={(e) => setPension(i, { label: e.target.value })} />
+                </td>
+                <td>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      set(
+                        "pension_accounts",
+                        form.pension_accounts.filter((_, j) => j !== i),
+                      )
+                    }
+                  >
+                    Odebrat
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <button
+          type="button"
+          onClick={() => set("pension_accounts", [...form.pension_accounts, { account: "", label: "", vs: "" }])}
         >
           Přidat účet
         </button>

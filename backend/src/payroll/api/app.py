@@ -14,7 +14,7 @@ import boto3
 
 from payroll import abo, auth
 from payroll.abo import AboParseError
-from payroll.accounts import InvalidAccountError
+from payroll.accounts import BankAccount, InvalidAccountError
 from payroll.api.router import HttpError, Request, Response, Router, session_cookie
 from payroll.batch import (
     Classification,
@@ -25,7 +25,7 @@ from payroll.batch import (
     split,
 )
 from payroll.calendar_cz import is_business_day
-from payroll.models import Employee, Group
+from payroll.models import Employee, Group, Settings
 from payroll.payslips import split_payslips
 from payroll.repository import Repository, utcnow
 from payroll.serde import (
@@ -108,6 +108,13 @@ def me(req: Request) -> dict[str, Any]:
 # --- employees ---------------------------------------------------------------
 
 
+def _settings_accounts(settings: Settings) -> dict[BankAccount, str]:
+    """Deduction and pension accounts with their labels."""
+    accounts = {k.account: k.label for k in settings.deduction_accounts}
+    accounts.update({k.account: k.label for k in settings.pension_accounts})
+    return accounts
+
+
 def _validate_employee(employee: Employee, others: list[Employee]) -> None:
     if not employee.number:
         raise HttpError(400, "Employee number is required")
@@ -120,6 +127,14 @@ def _validate_employee(employee: Employee, others: list[Employee]) -> None:
             raise HttpError(400, f"Invalid account number {acc.account}")
         if acc.valid_to and acc.valid_to < acc.valid_from:
             raise HttpError(400, f"Account {acc.account}: valid to is before valid from")
+    settings_accounts = _settings_accounts(repo().get_settings())
+    for acc in employee.accounts:
+        if acc.account in settings_accounts:
+            raise HttpError(
+                400,
+                f"Account {acc.account} is configured in settings as "
+                f"{settings_accounts[acc.account]}",
+            )
     for other in others:
         if other.id == employee.id:
             continue
@@ -204,9 +219,10 @@ def put_settings(req: Request) -> dict[str, Any]:
         raise HttpError(400, f"Invalid settings: {exc}") from None
     if settings.payer_account and not settings.payer_account.is_valid:
         raise HttpError(400, f"Invalid company account {settings.payer_account}")
-    for known in settings.deduction_accounts:
+    for known in (*settings.deduction_accounts, *settings.pension_accounts):
         if not known.account.is_valid:
             raise HttpError(400, f"Invalid account number {known.account}")
+    _validate_settings_accounts(settings)
     for rule in settings.due_dates.values():
         if not 1 <= rule.day <= 31 or not 0 <= rule.month_offset <= 2:
             raise HttpError(400, "Invalid due date rule")
@@ -221,6 +237,31 @@ def put_settings(req: Request) -> dict[str, Any]:
     changed = {k: {"before": before[k], "after": v} for k, v in after.items() if before[k] != v}
     repo().audit(req.username, "settings.update", changes=changed)
     return after
+
+
+def _validate_settings_accounts(settings: Settings) -> None:
+    deduction = [k.account for k in settings.deduction_accounts]
+    if len(set(deduction)) != len(deduction):
+        raise HttpError(400, "A deduction account is listed more than once")
+    pension: dict[BankAccount, list[str]] = {}
+    for rule in settings.pension_accounts:
+        pension.setdefault(rule.account, []).append(rule.vs.lstrip("0"))
+    for account, symbols in pension.items():
+        if account in deduction:
+            raise HttpError(400, f"Account {account} is both a deduction and a pension account")
+        # A shared pension account needs a distinct variable symbol for every entry.
+        if len(symbols) > 1 and (not all(symbols) or len(set(symbols)) != len(symbols)):
+            raise HttpError(
+                400,
+                f"Pension account {account} is used more than once; every entry needs "
+                "its own variable symbol",
+            )
+    for employee in repo().list_employees():
+        for acc in employee.accounts:
+            if acc.account in deduction or acc.account in pension:
+                raise HttpError(
+                    400, f"Account {acc.account} already belongs to {employee.full_name}"
+                )
 
 
 # --- batches -----------------------------------------------------------------
@@ -275,6 +316,7 @@ def _classify(batch: dict[str, Any]) -> tuple[abo.AboFile, Classification]:
         repo().list_employees(),
         repo().get_settings(),
         on=date.fromisoformat(batch["imported_at"][:10]),
+        period=batch["period"],
         overrides=overrides,
         previous_salaries=previous.get("salaries_by_employee"),
     )
@@ -282,7 +324,10 @@ def _classify(batch: dict[str, Any]) -> tuple[abo.AboFile, Classification]:
 
 
 def _due_dates(batch: dict[str, Any]) -> dict[Group, date]:
-    return {Group(k): date.fromisoformat(v) for k, v in batch["due_dates"].items()}
+    # Groups added after the batch was imported fall back to the configured rule.
+    due_dates = default_due_dates(batch["period"], repo().get_settings())
+    due_dates.update({Group(k): date.fromisoformat(v) for k, v in batch["due_dates"].items()})
+    return due_dates
 
 
 def _batch_summary(batch: dict[str, Any]) -> dict[str, Any]:
@@ -341,6 +386,7 @@ def get_batch(req: Request) -> dict[str, Any]:
     period = _period(req)
     batch = _batch(period)
     _, classification = _classify(batch)
+    batch["due_dates"] = {g.value: d.isoformat() for g, d in _due_dates(batch).items()}
     return {
         "batch": _batch_summary(batch),
         "classification": classification_to_dict(classification),
@@ -370,7 +416,7 @@ def put_due_dates(req: Request) -> dict[str, Any]:
     period = _period(req)
     batch = _batch(period)
     _ensure_not_uploaded(batch)
-    due_dates = dict(batch["due_dates"])
+    due_dates = {g.value: d.isoformat() for g, d in _due_dates(batch).items()}
     for key, value in (req.json().get("due_dates") or {}).items():
         try:
             group, day = Group(key), date.fromisoformat(value)
@@ -398,11 +444,13 @@ def generate_outputs(req: Request) -> dict[str, Any]:
     except SplitError as exc:
         raise HttpError(409, str(exc)) from None
 
+    settings = repo().get_settings()
     outputs: dict[str, Any] = {}
-    for group, output in files.items():
-        filename = output_filename(group, period, due_dates[group])
+    for group, data in files.items():
+        filename = output_filename(group, period, settings.due_dates[group].day)
         key = f"batches/{period}/output/{filename}"
-        repo().put_file(key, abo.serialize(output), "text/plain")
+        repo().put_file(key, data, "text/plain")
+        output = abo.parse(data)
         outputs[group.value] = {
             "filename": filename,
             "key": key,

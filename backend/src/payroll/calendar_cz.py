@@ -16,18 +16,23 @@ class Shift(StrEnum):
 
 
 def easter_sunday(year: int) -> date:
-    # Anonymous Gregorian algorithm (Meeus/Jones/Butcher).
+    """Easter Sunday in the Gregorian calendar using Gauss's algorithm."""
     a = year % 19
-    b, c = divmod(year, 100)
-    d, e = divmod(b, 4)
-    f = (b + 8) // 25
-    g = (b - f + 1) // 3
-    h = (19 * a + b - d - g + 15) % 30
-    i, k = divmod(c, 4)
-    m = (32 + 2 * e + 2 * i - h - k) % 7
-    n = (a + 11 * h + 22 * m) // 451
-    month, day = divmod(h + m - 7 * n + 114, 31)
-    return date(year, month, day + 1)
+    b = year % 4
+    c = year % 7
+    k = year // 100
+    p = (13 + 8 * k) // 25
+    q = k // 4
+    m = (15 - p + k - q) % 30
+    n = (4 + k - q) % 7
+    d = (19 * a + m) % 30
+    e = (2 * b + 4 * c + 6 * d + n) % 7
+    # Gauss's two exceptions keep Easter on or before 25 April.
+    if d == 29 and e == 6:
+        return date(year, 4, 19)
+    if d == 28 and e == 6 and (11 * m + 11) % 30 < 19:
+        return date(year, 4, 18)
+    return date(year, 3, 22) + timedelta(days=d + e)
 
 
 @cache

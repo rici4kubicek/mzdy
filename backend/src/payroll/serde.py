@@ -14,6 +14,7 @@ from payroll.models import (
     EmployeeAccount,
     Group,
     KnownAccount,
+    PensionAccount,
     Settings,
 )
 
@@ -66,6 +67,9 @@ def settings_to_dict(s: Settings) -> dict[str, Any]:
         "deduction_accounts": [
             {"account": str(k.account), "label": k.label} for k in s.deduction_accounts
         ],
+        "pension_accounts": [
+            {"account": str(k.account), "label": k.label, "vs": k.vs} for k in s.pension_accounts
+        ],
         "due_dates": {
             group.value: {
                 "day": rule.day,
@@ -98,6 +102,14 @@ def settings_from_dict(d: dict[str, Any]) -> Settings:
             KnownAccount(BankAccount.parse(k["account"]), k.get("label", "").strip())
             for k in d.get("deduction_accounts", [])
         ),
+        pension_accounts=tuple(
+            PensionAccount(
+                BankAccount.parse(k["account"]),
+                k.get("label", "").strip(),
+                str(k.get("vs") or "").strip().lstrip("0"),
+            )
+            for k in d.get("pension_accounts", [])
+        ),
         due_dates=due_dates,
         account_change_warning_days=int(
             d.get("account_change_warning_days", defaults.account_change_warning_days)
@@ -128,6 +140,7 @@ def classification_to_dict(c: Classification) -> dict[str, Any]:
                 "employee_id": ci.employee_id,
                 "label": ci.label,
                 "overridden": ci.overridden,
+                "comment": ci.comment,
             }
             for ci in c.items
         ],

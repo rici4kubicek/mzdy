@@ -18,7 +18,7 @@ def test_parse_sample(sample_abo):
     group = f.groups[0]
     assert group.payer == AccountNumber("", "1000000005")
     assert group.due_date == date(2026, 11, 12)
-    assert group.total == group.items_total == 7_550_000
+    assert group.total == group.items_total == 7_800_000
     first = group.items[0]
     assert first.payee == BankAccount.parse("1000000013/0800")
     assert first.amount == 3_200_000
@@ -37,7 +37,7 @@ def test_serialize_uses_fixed_widths(sample_abo):
     lines = abo.serialize(abo.parse(sample_abo)).decode().split("\r\n")
     assert lines[0] == "UHL1151026Firma s.r.o.        0000123456001999000000000000"
     assert lines[1] == "1 1501 001000 0300"
-    assert lines[2] == "2 000000-1000000005 00000007550000 121126"
+    assert lines[2] == "2 000000-1000000005 00000007800000 121126"
     assert lines[3] == (
         "000000-1000000013 000003200000 0000001001 08000000 0000000000 AV:Mzda 10/2026"
     )
@@ -94,3 +94,28 @@ def test_parse_errors(sample_abo, mutate, message):
 def test_empty_file():
     with pytest.raises(AboParseError, match="empty"):
         abo.parse(b"")
+
+
+def test_np_note_is_kept_as_message(sample_abo):
+    text = sample_abo.replace(" AV:Mzda 10/2026", " NP: VZP", 1)
+    item = abo.parse(text).items[0]
+    assert item.message == "NP: VZP"
+    assert item.ss == ""
+
+
+def test_write_subset_copies_lines_and_rewrites_headers(sample_abo):
+    source = abo.parse(sample_abo)
+    group = source.groups[0]
+    entries = [(group.items[0], "AV: Mzda 1026 NP: Jan Novák"), (group.items[2], "")]
+    data = abo.write_subset(source, [(group, entries)], date(2026, 11, 13), date(2026, 11, 2))
+    lines = data.decode("ascii").split("\r\n")
+    assert lines == [
+        "UHL1021126Firma s.r.o.        0000123456001999000000000000",
+        "1 1501 001000 0300",
+        "2 000000-1000000005 00000004050000 131126",
+        "000000-1000000013 000003200000 0000001001 08000000 0000000000 AV: Mzda 1026 NP: Jan Novak",
+        "000000-1000000021 000000850000 0000012345 07100558 0000000000",
+        "3 +",
+        "5 +",
+        "",
+    ]

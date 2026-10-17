@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import date
 from enum import StrEnum
 
@@ -11,7 +12,14 @@ from payroll import abo
 from payroll.abo import AboFile, AboGroup, AboItem
 from payroll.accounts import AccountNumber, BankAccount
 from payroll.calendar_cz import due_date
-from payroll.models import Employee, Group, Settings
+from payroll.models import Employee, Group, PensionAccount, Settings
+
+# Output file name stems, prefixed with the nominal due day (e.g. "15_mzdy_2026-04.kpc").
+FILE_NAMES = {
+    Group.SALARIES: "mzdy",
+    Group.DEDUCTIONS: "odvody",
+    Group.PENSION: "duchodove-pripojisteni",
+}
 
 
 class Severity(StrEnum):
@@ -37,6 +45,7 @@ class ClassifiedItem:
     employee_id: str | None = None
     label: str = ""
     overridden: bool = False
+    comment: str = ""
 
 
 @dataclass
@@ -65,6 +74,51 @@ def _strs(params: dict[str, object]) -> dict[str, str]:
     return {key: str(value) for key, value in params.items()}
 
 
+def _line_numbers(item: AboItem) -> set[str]:
+    """All numbers on the item's line, without leading zeros."""
+    text = item.raw or " ".join([item.vs, item.ks, item.ss, item.message])
+    return {n.lstrip("0") for n in re.findall(r"\d+", text)}
+
+
+def _match_pension(
+    item: AboItem, rules: list[PensionAccount]
+) -> tuple[PensionAccount | None, bool]:
+    """Find the pension rule for an item; the flag says whether the account is a pension one.
+
+    A rule with a variable symbol matches only when that number appears anywhere
+    on the payment line; a rule without one matches any payment to the account.
+    """
+    candidates = [r for r in rules if r.account == item.payee]
+    if not candidates:
+        return None, False
+    numbers = _line_numbers(item)
+    for rule in candidates:
+        if rule.vs and rule.vs.lstrip("0") in numbers:
+            return rule, True
+    return next((r for r in candidates if not r.vs), None), True
+
+
+def period_code(period: str) -> str:
+    """``2026-04`` -> ``0426`` (MMYY), as used in salary payment comments."""
+    return period[5:7] + period[2:4]
+
+
+def payment_comment(group: Group | None, period: str, label: str, original: str) -> str:
+    """Message written to the output line for a payment of the given group."""
+    if group is Group.SALARIES:
+        return f"AV: Mzda {period_code(period)} NP: {label}"
+    if group is Group.PENSION and label:
+        return f"NP: {label} důch. připojištění"
+    if group in (Group.DEDUCTIONS, Group.PENSION):
+        if label:
+            return f"NP: {label}"
+        # Manually assigned payment without a known payee keeps its original text.
+        if not original or original.startswith(("AV:", "NP:")):
+            return original
+        return f"NP: {original}"
+    return ""
+
+
 def _employee_lookup(
     employees: list[Employee], on: date
 ) -> tuple[dict[BankAccount, Employee], dict[BankAccount, Employee]]:
@@ -85,13 +139,15 @@ def classify(
     employees: list[Employee],
     settings: Settings,
     on: date,
+    period: str,
     overrides: dict[int, Group] | None = None,
     previous_salaries: dict[str, int] | None = None,
 ) -> Classification:
-    """Assign every payment to a group and run all checks.
+    """Assign every payment to a group, compute its comment and run all checks.
 
     ``on`` is the date against which account validity is evaluated (normally the
-    import date). ``overrides`` maps item index to a manually chosen group.
+    import date); ``period`` (``YYYY-MM``) is the payroll month used in comments.
+    ``overrides`` maps item index to a manually chosen group.
     ``previous_salaries`` maps employee id to last month's salary total.
     """
     overrides = overrides or {}
@@ -159,6 +215,18 @@ def classify(
                 )
         elif payee in known:
             group_for_item, label = Group.DEDUCTIONS, known[payee]
+        elif (pension := _match_pension(item, list(settings.pension_accounts)))[1]:
+            rule = pension[0]
+            if rule is None:
+                error(
+                    "pension_vs_not_found",
+                    f"Payment to pension account {payee} does not contain any of the "
+                    "configured variable symbols.",
+                    index,
+                    account=payee,
+                )
+            else:
+                group_for_item, label = Group.PENSION, rule.label
         elif payee in expired:
             error(
                 "expired_account",
@@ -184,7 +252,8 @@ def classify(
                 group_for_item = target
 
         if group_for_item is None and not any(
-            i.item == index and i.code in {"expired_account", "salary_to_unknown_account"}
+            i.item == index
+            and i.code in {"expired_account", "salary_to_unknown_account", "pension_vs_not_found"}
             for i in issues
         ):
             error(
@@ -194,8 +263,11 @@ def classify(
                 account=payee,
             )
 
+        comment = payment_comment(group_for_item, period, label, item.message)
         items.append(
-            ClassifiedItem(index, item, payer, group_for_item, employee_id, label, overridden)
+            ClassifiedItem(
+                index, item, payer, group_for_item, employee_id, label, overridden, comment
+            )
         )
 
     paid = defaultdict(int)
@@ -243,44 +315,42 @@ def split(
     classification: Classification,
     due_dates: dict[Group, date],
     created: date,
-) -> dict[Group, AboFile]:
-    """Build one ABO file per non-empty group. Refuses to run with blocking errors."""
+) -> dict[Group, bytes]:
+    """Build one ABO file per non-empty group. Refuses to run with blocking errors.
+
+    Lines are copied from the input with the computed comment; see
+    :func:`payroll.abo.write_subset` for how the headers are rewritten.
+    """
     if classification.has_errors:
         raise SplitError("The batch has blocking errors.")
 
-    outputs: dict[Group, AboFile] = {}
-    header = replace(source.header, created=created)
-    for seq, group in enumerate(Group, start=1):
+    flat = [(g, i) for g in source.groups for i in g.items]
+    outputs: dict[Group, bytes] = {}
+    for group in Group:
         members = [c for c in classification.items if c.group is group]
         if not members:
             continue
-        # Items with different payers end up in separate ABO groups.
-        by_payer: dict[AccountNumber | None, list[AboItem]] = defaultdict(list)
+        # Keep the input's group structure (one "2" line per source group).
+        parts: dict[int, tuple[AboGroup, list[tuple[AboItem, str]]]] = {}
         for c in members:
-            by_payer[c.payer].append(c.item)
-        groups = tuple(
-            AboGroup(
-                due_date=due_dates[group],
-                total=sum(i.amount for i in payer_items),
-                items=tuple(payer_items),
-                payer=payer,
-            )
-            for payer, payer_items in by_payer.items()
-        )
-        outputs[group] = replace(source, header=header, groups=groups, file_number=f"{seq:03d}000")
+            source_group, item = flat[c.index]
+            parts.setdefault(id(source_group), (source_group, []))[1].append((item, c.comment))
+        outputs[group] = abo.write_subset(source, list(parts.values()), due_dates[group], created)
 
-    output_total = sum(f.total for f in outputs.values())
-    output_count = sum(len(f.items) for f in outputs.values())
+    # Re-read every output to make sure it is well-formed and nothing was lost.
+    parsed = [abo.parse(data) for data in outputs.values()]
+    output_total = sum(f.total for f in parsed)
+    output_count = sum(len(f.items) for f in parsed)
     if output_total != source.total or output_count != len(source.items):
         raise SplitError(
             f"Output files ({output_count} items, {output_total}) do not match the input "
             f"({len(source.items)} items, {source.total})."
         )
-    # Round-trip every output through the parser to make sure it is well-formed.
-    for output in outputs.values():
-        abo.parse(abo.serialize(output))
+    for f in parsed:
+        if any(g.total != g.items_total for g in f.groups):
+            raise SplitError("Output group total does not match its items.")
     return outputs
 
 
-def output_filename(group: Group, period: str, due: date) -> str:
-    return f"{group.value}_{period}_due-{due.isoformat()}.kpc"
+def output_filename(group: Group, period: str, day: int) -> str:
+    return f"{day:02d}_{FILE_NAMES[group]}_{period}.kpc"

@@ -13,6 +13,7 @@ from payroll.calendar_cz import Shift
 class Group(StrEnum):
     SALARIES = "salaries"
     DEDUCTIONS = "deductions"
+    PENSION = "pension"
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,19 @@ class KnownAccount:
 
 
 @dataclass(frozen=True)
+class PensionAccount:
+    """Supplementary pension savings paid for an employee.
+
+    Several employees may save with the same pension fund account; they are told
+    apart by ``vs``, which is searched for in any field of the payment line.
+    """
+
+    account: BankAccount
+    label: str
+    vs: str = ""
+
+
+@dataclass(frozen=True)
 class DueDateRule:
     day: int
     month_offset: int = 1
@@ -59,10 +73,12 @@ class DueDateRule:
 class Settings:
     payer_account: AccountNumber | None = None
     deduction_accounts: tuple[KnownAccount, ...] = ()
+    pension_accounts: tuple[PensionAccount, ...] = ()
     due_dates: dict[Group, DueDateRule] = field(
         default_factory=lambda: {
-            Group.SALARIES: DueDateRule(day=12),
+            Group.SALARIES: DueDateRule(day=15),
             Group.DEDUCTIONS: DueDateRule(day=20),
+            Group.PENSION: DueDateRule(day=25),
         }
     )
     account_change_warning_days: int = 30

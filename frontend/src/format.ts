@@ -31,6 +31,7 @@ export function formatPeriod(period: string): string {
 export const groupNames: Record<Group, string> = {
   salaries: "Mzdy",
   deductions: "Odvody",
+  pension: "Důchodové připojištění",
 };
 
 export const batchStatusNames: Record<string, string> = {
@@ -57,6 +58,8 @@ const issueTexts: Record<string, (p: Record<string, string>) => string> = {
   expired_account: (p) => `Účet ${p.account} už u zaměstnance ${p.name} neplatí.`,
   salary_to_unknown_account: (p) =>
     `Účet ${p.account} nepatří žádnému zaměstnanci. Nejprve ho přidejte k zaměstnanci.`,
+  pension_vs_not_found: (p) =>
+    `Platba na účet penzijního připojištění ${p.account} neobsahuje žádný z nastavených variabilních symbolů.`,
   unassigned: (p) => `Platba na neznámý účet ${p.account}. Zařaďte ji do skupiny.`,
   missing_salary: (p) => `${p.name} nemá v souboru žádnou mzdu.`,
   salary_change: (p) =>
