@@ -4,6 +4,9 @@
 
 Serves the built frontend from ../frontend/dist and the API under /api. E-mails
 are not delivered; the mailer runs against the emulated SES. Data is lost on exit.
+Presigned S3 URLs are rewritten to /_s3/... and proxied to the emulator, so the
+app also works when opened from another machine (e.g. in the Docker container).
+The admin password can be set with ADMIN_PASSWORD.
 """
 
 from __future__ import annotations
@@ -15,18 +18,22 @@ import mimetypes
 import os
 import threading
 import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 
 MOTO_PORT = 5055
+MOTO_URL = f"http://localhost:{MOTO_PORT}"
+S3_PROXY_PREFIX = "/_s3"
 DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
 os.environ.update(
     AWS_DEFAULT_REGION="eu-central-1",
     AWS_ACCESS_KEY_ID="local",
     AWS_SECRET_ACCESS_KEY="local",
-    AWS_ENDPOINT_URL=f"http://localhost:{MOTO_PORT}",
+    AWS_ENDPOINT_URL=MOTO_URL,
     TABLE_NAME="payroll",
     BUCKET_NAME="payroll-data",
     JWT_SECRET="local-development-secret-not-for-production",
@@ -106,7 +113,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header(key, value)
         for cookie in response.get("cookies", []):
             self.send_header("Set-Cookie", cookie)
-        payload = response["body"].encode()
+        # Presigned URLs point at the emulator; route them through this server instead.
+        payload = response["body"].replace(MOTO_URL, S3_PROXY_PREFIX).encode()
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
@@ -123,8 +131,33 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _s3(self) -> None:
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else None
+        headers = {k: v for k, v in self.headers.items() if k.lower() in ("content-type",)}
+        request = urllib.request.Request(
+            MOTO_URL + self.path[len(S3_PROXY_PREFIX) :],
+            data=body,
+            headers=headers,
+            method=self.command,
+        )
+        try:
+            with urllib.request.urlopen(request) as upstream:
+                status, upstream_headers, data = upstream.status, upstream.headers, upstream.read()
+        except urllib.error.HTTPError as exc:
+            status, upstream_headers, data = exc.code, exc.headers, exc.read()
+        self.send_response(status)
+        for key in ("Content-Type", "Content-Disposition", "ETag"):
+            if upstream_headers.get(key):
+                self.send_header(key, upstream_headers[key])
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def _dispatch(self) -> None:
-        if self.path.startswith("/api/"):
+        if self.path.startswith(S3_PROXY_PREFIX + "/"):
+            self._s3()
+        elif self.path.startswith("/api/"):
             self._api()
         else:
             self._static()
@@ -137,6 +170,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
 
@@ -147,12 +181,12 @@ def main() -> None:
     from payroll.cli import create_user
     from payroll.repository import Repository
 
-    create_user(Repository(), "admin", "admin", "admin-password")
+    create_user(Repository(), "admin", "admin", os.environ.get("ADMIN_PASSWORD", "admin-password"))
     boto3.client("ses").verify_email_identity(EmailAddress="mzdy@example.com")
     threading.Thread(target=run_mailer, daemon=True).start()
 
     print(json.dumps({"url": f"http://localhost:{args.port}", "user": "admin"}))
-    ThreadingHTTPServer(("127.0.0.1", args.port), Handler).serve_forever()
+    ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()
 
 
 if __name__ == "__main__":

@@ -1,0 +1,10 @@
+# Test deployment: docker compose up -d --build
+services:
+  mzdy-test:
+    build: .
+    image: mzdy-test
+    ports:
+      - "8000:8000"
+    environment:
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin-password}
+    restart: unless-stopped
