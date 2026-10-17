@@ -76,6 +76,23 @@ uv run python devserver.py
 For frontend work with hot reload, run `devserver.py` and in another terminal
 `VITE_API_PROXY=http://localhost:8000 npm run dev` in `frontend/`.
 
+## Test container (fully local)
+
+For testing, the whole application runs in one Docker container with AWS
+(DynamoDB, S3, SQS, SES) emulated in memory. No AWS account or internet access
+is needed at runtime. Data is lost when the container stops and e-mails are not
+actually delivered.
+
+```bash
+docker compose up -d --build          # or: docker build -t mzdy-test . && docker run -p 8000:8000 mzdy-test
+# open http://localhost:8000 and log in as admin / admin-password
+ADMIN_PASSWORD=something-else docker compose up -d   # different password
+docker compose down                   # stop and discard all data
+```
+
+When building behind a TLS-intercepting proxy, pass its CA certificate:
+`docker build --secret id=ca_bundle,src=/path/to/ca.crt -t mzdy-test .`
+
 ## Deployment to AWS
 
 Prerequisites: AWS CLI configured for the target account, Node.js 22, uv.
