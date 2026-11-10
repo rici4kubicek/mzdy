@@ -1,0 +1,21 @@
+# Publish through an existing Traefik instead of a host port.
+# Enable it in .env:  COMPOSE_FILE=compose.yaml:compose.traefik.yaml
+#
+# Expects Traefik on the external Docker network "proxy" with TLS on its entry
+# point (as on david.lan); the host name is MZDY_HOST (default mzdy.david.lan).
+services:
+  mzdy:
+    ports: !reset []
+    environment:
+      # Browsers reach the app only over HTTPS through Traefik.
+      COOKIE_SECURE: "true"
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.mzdy.rule: "Host(`${MZDY_HOST:-mzdy.david.lan}`)"
+      traefik.http.services.mzdy.loadbalancer.server.port: "8000"
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    external: true

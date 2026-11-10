@@ -96,7 +96,12 @@ docker compose exec mzdy python -m payroll.cli create-user admin --role admin   
 
 * **HTTPS**: the container speaks plain HTTP. Inside a trusted LAN keep
   `COOKIE_SECURE=false`; otherwise put it behind a reverse proxy with TLS
-  (Caddy, Traefik, nginx) and set `COOKIE_SECURE=true`.
+  and set `COOKIE_SECURE=true`.
+* **Traefik**: with Traefik on the external Docker network `proxy` (TLS on its
+  entry point), add `COMPOSE_FILE=compose.yaml:compose.traefik.yaml` and
+  optionally `MZDY_HOST=mzdy.example.lan` to `.env`, then `docker compose up -d`.
+  The container then publishes no host port, is reachable only at
+  `https://$MZDY_HOST` (default `mzdy.david.lan`) and uses secure cookies.
 * **Update**: `git pull && docker compose up -d --build` (data in the volume is kept).
 * **Backup**: the volume holds everything, e.g.
   `docker run --rm -v mzdy_mzdy-data:/data -v "$PWD":/backup busybox tar czf /backup/mzdy-backup.tgz -C /data .`
