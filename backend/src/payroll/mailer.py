@@ -1,17 +1,26 @@
-"""SQS consumer Lambda that e-mails payslips through Amazon SES."""
+"""E-mailing payslips.
+
+Messages go through the SMTP server named by ``SMTP_HOST`` (self-hosted) or through
+Amazon SES. ``handler`` is the SQS consumer Lambda on AWS; the self-hosted server
+calls :func:`send_one` from its own worker thread.
+
+SMTP settings: ``SMTP_HOST``, ``SMTP_PORT`` (default 587), ``SMTP_USERNAME``,
+``SMTP_PASSWORD`` and ``SMTP_SECURITY``: ``starttls`` (default), ``ssl`` or ``none``.
+"""
 
 from __future__ import annotations
 
 import json
 import logging
+import os
+import smtplib
+import ssl
 from email.message import EmailMessage
 from email.utils import formataddr, formatdate, make_msgid
 from typing import Any
 
-import boto3
-
 from payroll.models import Employee, Settings
-from payroll.repository import Repository, utcnow
+from payroll.repository import Repository, create_repository, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +30,45 @@ _repo: Repository | None = None
 def repo() -> Repository:
     global _repo
     if _repo is None:
-        _repo = Repository()
+        _repo = create_repository()
     return _repo
+
+
+def is_configured() -> bool:
+    """Self-hosted installations need an SMTP server; on AWS, SES is always there."""
+    return bool(os.environ.get("SMTP_HOST")) or not os.environ.get("DATA_DIR")
+
+
+def _send_smtp(message: EmailMessage) -> None:
+    host = os.environ["SMTP_HOST"]
+    security = os.environ.get("SMTP_SECURITY", "starttls").lower()
+    port = int(os.environ.get("SMTP_PORT") or (465 if security == "ssl" else 587))
+    context = ssl.create_default_context()
+    if security == "ssl":
+        client: smtplib.SMTP = smtplib.SMTP_SSL(host, port, context=context, timeout=30)
+    else:
+        client = smtplib.SMTP(host, port, timeout=30)
+    with client:
+        if security == "starttls":
+            client.starttls(context=context)
+        if os.environ.get("SMTP_USERNAME"):
+            client.login(os.environ["SMTP_USERNAME"], os.environ.get("SMTP_PASSWORD", ""))
+        client.send_message(message)
+
+
+def deliver(message: EmailMessage) -> None:
+    if os.environ.get("SMTP_HOST"):
+        _send_smtp(message)
+        return
+    if os.environ.get("DATA_DIR"):
+        raise RuntimeError("SMTP server is not configured (SMTP_HOST)")
+    import boto3
+
+    boto3.client("ses").send_raw_email(
+        Source=message["From"],
+        Destinations=[message["To"].addresses[0].addr_spec],
+        RawMessage={"Data": message.as_bytes()},
+    )
 
 
 def _render(template: str, employee: Employee, period: str) -> str:
@@ -62,11 +108,7 @@ def send_one(period: str, employee_id: str) -> None:
     settings = r.get_settings()
     message = build_message(settings, employee, period, r.get_file(payslip["key"]))
     try:
-        boto3.client("ses").send_raw_email(
-            Source=settings.email_sender,
-            Destinations=[employee.email],
-            RawMessage={"Data": message.as_bytes()},
-        )
+        deliver(message)
     except Exception as exc:
         payslip.update(status="failed", error=str(exc))
         r.put_payslip(period, payslip)

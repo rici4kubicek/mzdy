@@ -1,10 +1,18 @@
-# Test deployment: docker compose up -d --build
+# Self-hosted deployment:
+#   cp .env.example .env    # then edit .env
+#   docker compose up -d --build
 services:
-  mzdy-test:
+  mzdy:
     build: .
-    image: mzdy-test
+    image: mzdy
     ports:
-      - "8000:8000"
-    environment:
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin-password}
+      - "${PORT:-8000}:8000"
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - mzdy-data:/data
     restart: unless-stopped
+
+volumes:
+  mzdy-data:

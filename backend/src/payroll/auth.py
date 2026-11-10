@@ -56,12 +56,32 @@ DUMMY_HASH = hash_password(secrets.token_hex(16))
 _secret_cache: str | None = None
 
 
+def _local_secret(data_dir: str) -> str:
+    """A key generated on first start and kept in the data directory."""
+    path = os.path.join(data_dir, "signing-key")
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        with open(path) as f:
+            return f.read().strip()
+    with os.fdopen(fd, "w") as f:
+        key = secrets.token_hex(32)
+        f.write(key)
+    return key
+
+
 def signing_secret() -> str:
-    """JWT signing key from SSM Parameter Store (or JWT_SECRET for local runs)."""
+    """Key for session tokens and signed file URLs.
+
+    JWT_SECRET if set, else a key stored in DATA_DIR (self-hosted), else the
+    SSM parameter named by JWT_SECRET_PARAM (AWS).
+    """
     global _secret_cache
     if _secret_cache is None:
         if os.environ.get("JWT_SECRET"):
             _secret_cache = os.environ["JWT_SECRET"]
+        elif os.environ.get("DATA_DIR"):
+            _secret_cache = _local_secret(os.environ["DATA_DIR"])
         else:
             import boto3
 

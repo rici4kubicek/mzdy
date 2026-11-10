@@ -3,16 +3,13 @@
 from __future__ import annotations
 
 import base64
-import json
 import os
 import re
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-import boto3
-
-from payroll import abo, auth
+from payroll import abo, auth, mailer
 from payroll.abo import AboParseError
 from payroll.accounts import BankAccount, InvalidAccountError
 from payroll.api.router import HttpError, Request, Response, Router, session_cookie
@@ -27,7 +24,7 @@ from payroll.batch import (
 from payroll.calendar_cz import is_business_day
 from payroll.models import Employee, Group, Settings
 from payroll.payslips import split_payslips
-from payroll.repository import Repository, utcnow
+from payroll.repository import LocalRepository, Repository, create_repository, utcnow
 from payroll.serde import (
     classification_to_dict,
     employee_from_dict,
@@ -45,7 +42,7 @@ _PERIOD_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 def repo() -> Repository:
     global _repo
     if _repo is None:
-        _repo = Repository()
+        _repo = create_repository()
     return _repo
 
 
@@ -592,9 +589,10 @@ def send_payslips(req: Request) -> dict[str, Any]:
     _batch(period)
     if not repo().get_settings().email_sender:
         raise HttpError(400, "Sender e-mail address is not configured in settings")
+    if not mailer.is_configured():
+        raise HttpError(400, "SMTP server is not configured on the server")
     requested = req.json().get("employee_ids")
     employees = {e.id: e for e in repo().list_employees()}
-    sqs = boto3.client("sqs")
     queued: list[str] = []
     skipped: list[dict[str, str]] = []
     for payslip in repo().list_payslips(period):
@@ -610,13 +608,52 @@ def send_payslips(req: Request) -> dict[str, Any]:
             continue
         payslip.update(status="queued", error=None)
         repo().put_payslip(period, payslip)
-        sqs.send_message(
-            QueueUrl=os.environ["QUEUE_URL"],
-            MessageBody=json.dumps({"period": period, "employee_id": employee_id}),
-        )
+        repo().enqueue_payslip(period, employee_id)
         queued.append(employee_id)
     repo().audit(req.username, "payslips.send", period=period, queued=queued, skipped=skipped)
     return {"queued": queued, "skipped": skipped}
+
+
+# --- files (self-hosted only) ------------------------------------------------
+#
+# Counterpart of S3 presigned URLs: LocalRepository.download_url / upload_url sign
+# the request parameters, so these routes need no session cookie or CSRF header.
+
+
+def _signed_file(req: Request) -> tuple[LocalRepository, dict[str, str]]:
+    storage = repo()
+    if not isinstance(storage, LocalRepository):
+        raise HttpError(404, "Not found")
+    params = storage.verify_url(req.method, req.query)
+    if params is None:
+        raise HttpError(403, "Invalid or expired link")
+    return storage, params
+
+
+@router.route("GET", "/api/files", public=True, csrf=False)
+def download_file(req: Request) -> Response:
+    storage, params = _signed_file(req)
+    try:
+        data = storage.get_file(params["key"])
+    except FileNotFoundError:
+        raise HttpError(404, "File not found") from None
+    filename = params.get("filename", "file").replace('"', "")
+    content_type = "application/pdf" if filename.lower().endswith(".pdf") else "text/plain"
+    disposition = "inline" if params.get("disposition") == "inline" else "attachment"
+    return Response(
+        raw=data,
+        headers={
+            "Content-Type": content_type,
+            "Content-Disposition": f'{disposition}; filename="{filename}"',
+        },
+    )
+
+
+@router.route("PUT", "/api/files", public=True, csrf=False)
+def upload_file(req: Request) -> dict[str, Any]:
+    storage, params = _signed_file(req)
+    storage.put_file(params["key"], req.body, params.get("content_type", ""))
+    return {"ok": True}
 
 
 # --- audit -------------------------------------------------------------------
