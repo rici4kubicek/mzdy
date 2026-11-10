@@ -12,6 +12,8 @@ processes payroll output from **Pohoda** and prepares payments for **ČSOB**:
 3. **E-mails payslips**: a combined payslip PDF from Pohoda (or a ZIP of PDFs) is
    split per employee and sent through Amazon SES.
 
+It runs as a single Docker container on your own server (see *Self-hosted
+deployment*); an AWS serverless deployment is available as an alternative.
 See [docs/DESIGN.md](docs/DESIGN.md) for the full design. The user interface is
 in Czech; code and documentation are in English.
 
@@ -67,7 +69,7 @@ uv sync
 uv run pytest
 uv run ruff check src tests && uv run ruff format --check src tests
 
-# run the whole app locally against emulated AWS (moto), no AWS account needed
+# run the whole app locally with a throwaway data directory (--data DIR to keep it)
 (cd ../frontend && npm ci && npm run build)
 uv run python devserver.py
 # open http://localhost:8000 and log in as admin / admin-password
@@ -76,7 +78,42 @@ uv run python devserver.py
 For frontend work with hot reload, run `devserver.py` and in another terminal
 `VITE_API_PROXY=http://localhost:8000 npm run dev` in `frontend/`.
 
-## Deployment to AWS
+## Self-hosted deployment (Docker)
+
+The recommended way to run the application: one container on your own server
+with the API, the frontend and the payslip e-mail worker. Data is stored in the
+`mzdy-data` Docker volume (`/data`): an SQLite database, the imported and
+generated files, and the key that signs login sessions. E-mails go through your
+SMTP server. No AWS account is needed.
+
+```bash
+git clone https://github.com/rici4kubicek/mzdy && cd mzdy
+cp .env.example .env              # set SMTP_*, COOKIE_SECURE, optionally INITIAL_ADMIN_PASSWORD
+docker compose up -d --build
+docker compose exec mzdy python -m payroll.cli create-user admin --role admin   # asks for a password
+# open http://<server>:8000
+```
+
+* **HTTPS**: the container speaks plain HTTP. Inside a trusted LAN keep
+  `COOKIE_SECURE=false`; otherwise put it behind a reverse proxy with TLS
+  and set `COOKIE_SECURE=true`.
+* **Traefik**: with Traefik on the external Docker network `proxy` (TLS on its
+  entry point), add `COMPOSE_FILE=compose.yaml:compose.traefik.yaml` and
+  optionally `MZDY_HOST=mzdy.example.lan` to `.env`, then `docker compose up -d`.
+  The container then publishes no host port, is reachable only at
+  `https://$MZDY_HOST` (default `mzdy.david.lan`) and uses secure cookies.
+* **Update**: `git pull && docker compose up -d --build` (data in the volume is kept).
+* **Backup**: the volume holds everything, e.g.
+  `docker run --rm -v mzdy_mzdy-data:/data -v "$PWD":/backup busybox tar czf /backup/mzdy-backup.tgz -C /data .`
+  (stop the container first, or copy while no batch is being processed).
+* **Users**: `docker compose exec mzdy python -m payroll.cli create-user NAME`;
+  running it for an existing user resets the password.
+* **Logs**: `docker compose logs -f mzdy`.
+
+When building behind a TLS-intercepting proxy, pass its CA certificate:
+`docker build --secret id=ca_bundle,src=/path/to/ca.crt -t mzdy .`
+
+## Deployment to AWS (alternative)
 
 Prerequisites: AWS CLI configured for the target account, Node.js 22, uv.
 

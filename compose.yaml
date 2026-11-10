@@ -1,0 +1,18 @@
+# Self-hosted deployment:
+#   cp .env.example .env    # then edit .env
+#   docker compose up -d --build
+services:
+  mzdy:
+    build: .
+    image: mzdy
+    ports:
+      - "${PORT:-8000}:8000"
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - mzdy-data:/data
+    restart: unless-stopped
+
+volumes:
+  mzdy-data:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -58,6 +59,9 @@ class Response:
     body: Any = None
     status: int = 200
     cookies: list[str] = field(default_factory=list)
+    # Binary response (e.g. a file download) instead of the JSON ``body``.
+    raw: bytes | None = None
+    headers: dict[str, str] = field(default_factory=dict)
 
 
 Handler = Callable[[Request], Any]
@@ -69,6 +73,7 @@ class _Route:
     regex: re.Pattern[str]
     handler: Handler
     public: bool
+    csrf: bool
 
 
 def _parse_cookies(event: dict[str, Any]) -> dict[str, str]:
@@ -80,8 +85,10 @@ def _parse_cookies(event: dict[str, Any]) -> dict[str, str]:
 
 
 def session_cookie(token: str, max_age: int) -> str:
+    # COOKIE_SECURE=false allows logging in over plain HTTP (e.g. inside a LAN).
+    secure = "; Secure" if os.environ.get("COOKIE_SECURE", "true").lower() != "false" else ""
     return (
-        f"{SESSION_COOKIE}={token}; Path=/api; Max-Age={max_age}; HttpOnly; Secure; SameSite=Strict"
+        f"{SESSION_COOKIE}={token}; Path=/api; Max-Age={max_age}; HttpOnly{secure}; SameSite=Strict"
     )
 
 
@@ -90,12 +97,13 @@ class Router:
         self.routes: list[_Route] = []
 
     def route(
-        self, method: str, pattern: str, public: bool = False
+        self, method: str, pattern: str, public: bool = False, csrf: bool = True
     ) -> Callable[[Handler], Handler]:
+        """Register a handler. ``csrf=False`` only for routes authorized by a URL signature."""
         regex = re.compile("^" + re.sub(r"\{(\w+)\}", r"(?P<\1>[^/]+)", pattern) + "$")
 
         def decorator(handler: Handler) -> Handler:
-            self.routes.append(_Route(method, regex, handler, public))
+            self.routes.append(_Route(method, regex, handler, public, csrf))
             return handler
 
         return decorator
@@ -127,7 +135,11 @@ class Router:
                 request.user = auth.verify_token(request.cookies.get(SESSION_COOKIE, ""))
                 if request.user is None:
                     raise HttpError(401, "Not logged in")
-            if request.method != "GET" and request.headers.get(CSRF_HEADER) != "payroll":
+            if (
+                route.csrf
+                and request.method != "GET"
+                and request.headers.get(CSRF_HEADER) != "payroll"
+            ):
                 raise HttpError(403, "Missing X-Requested-With header")
             result = route.handler(request)
             return result if isinstance(result, Response) else Response(result)
@@ -141,11 +153,20 @@ class Router:
         except Exception:
             logger.exception("Unhandled error")
             response = Response({"error": "Internal server error"}, 500)
+        if response.raw is not None:
+            return {
+                "statusCode": response.status,
+                "headers": {"Cache-Control": "no-store", **response.headers},
+                "cookies": response.cookies,
+                "body": base64.b64encode(response.raw).decode(),
+                "isBase64Encoded": True,
+            }
         return {
             "statusCode": response.status,
             "headers": {
                 "Content-Type": "application/json",
                 "Cache-Control": "no-store",
+                **response.headers,
             },
             "cookies": response.cookies,
             "body": json.dumps(response.body, ensure_ascii=False),

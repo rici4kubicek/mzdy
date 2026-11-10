@@ -1,6 +1,7 @@
 """Administration commands.
 
-TABLE_NAME=... BUCKET_NAME=... python -m payroll.cli create-user alice --role admin
+DATA_DIR=/data python -m payroll.cli create-user alice --role admin      # self-hosted
+TABLE_NAME=... BUCKET_NAME=... python -m payroll.cli create-user alice     # AWS
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ import getpass
 import sys
 
 from payroll import auth
-from payroll.repository import Repository, utcnow
+from payroll.repository import Repository, create_repository, utcnow
 
 
 def create_user(repo: Repository, username: str, role: str, password: str) -> None:
@@ -41,7 +42,7 @@ def main(argv: list[str] | None = None) -> None:
         password = getpass.getpass("Password: ")
         if password != getpass.getpass("Repeat password: "):
             sys.exit("Passwords do not match")
-        create_user(Repository(), args.username, args.role, password)
+        create_user(create_repository(), args.username, args.role, password)
         print(f"User {args.username} saved.")
 
 

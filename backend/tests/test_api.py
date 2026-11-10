@@ -1,76 +1,137 @@
 import base64
 import json
-from urllib.parse import parse_qs, urlparse
+import smtplib
+from urllib.parse import parse_qs, parse_qsl, urlparse
 
 import boto3
 import pytest
 from moto import mock_aws
 
-from payroll import mailer
+from payroll import auth, mailer
 from payroll.api import app
 from payroll.cli import create_user
-from payroll.repository import Repository
+from payroll.repository import AwsRepository, LocalRepository
 from tests.pdfgen import make_pdf
 
 PASSWORD = "correct horse battery"
 
 
-@pytest.fixture
-def aws(monkeypatch):
+class FakeSMTP:
+    """Stands in for smtplib.SMTP; records sent messages."""
+
+    sent: list = []
+
+    def __init__(self, host, port, timeout=None):
+        self.host, self.port = host, port
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def starttls(self, context=None):
+        pass
+
+    def login(self, user, password):
+        pass
+
+    def send_message(self, message):
+        FakeSMTP.sent.append(message)
+
+
+def _aws_repo(monkeypatch):
     monkeypatch.setenv("AWS_DEFAULT_REGION", "eu-central-1")
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
     monkeypatch.setenv("TABLE_NAME", "payroll")
     monkeypatch.setenv("BUCKET_NAME", "payroll-data")
+    boto3.client("dynamodb").create_table(
+        TableName="payroll",
+        KeySchema=[
+            {"AttributeName": "pk", "KeyType": "HASH"},
+            {"AttributeName": "sk", "KeyType": "RANGE"},
+        ],
+        AttributeDefinitions=[
+            {"AttributeName": "pk", "AttributeType": "S"},
+            {"AttributeName": "sk", "AttributeType": "S"},
+        ],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    boto3.client("s3").create_bucket(
+        Bucket="payroll-data",
+        CreateBucketConfiguration={"LocationConstraint": "eu-central-1"},
+    )
+    queue = boto3.client("sqs").create_queue(QueueName="payslips")
+    monkeypatch.setenv("QUEUE_URL", queue["QueueUrl"])
+    boto3.client("ses").verify_email_identity(EmailAddress="mzdy@example.com")
+    return AwsRepository()
+
+
+@pytest.fixture(params=["aws", "local"])
+def repo(request, monkeypatch, tmp_path):
+    """The API runs against both storage backends."""
     monkeypatch.setenv("JWT_SECRET", "test-secret-test-secret-test-secret")
+    monkeypatch.setattr(auth, "_secret_cache", None)
     with mock_aws():
-        boto3.client("dynamodb").create_table(
-            TableName="payroll",
-            KeySchema=[
-                {"AttributeName": "pk", "KeyType": "HASH"},
-                {"AttributeName": "sk", "KeyType": "RANGE"},
-            ],
-            AttributeDefinitions=[
-                {"AttributeName": "pk", "AttributeType": "S"},
-                {"AttributeName": "sk", "AttributeType": "S"},
-            ],
-            BillingMode="PAY_PER_REQUEST",
-        )
-        boto3.client("s3").create_bucket(
-            Bucket="payroll-data",
-            CreateBucketConfiguration={"LocationConstraint": "eu-central-1"},
-        )
-        queue = boto3.client("sqs").create_queue(QueueName="payslips")
-        monkeypatch.setenv("QUEUE_URL", queue["QueueUrl"])
-        boto3.client("ses").verify_email_identity(EmailAddress="mzdy@example.com")
-        repo = Repository()
-        monkeypatch.setattr(app, "_repo", repo)
-        monkeypatch.setattr(mailer, "_repo", repo)
-        create_user(repo, "Ucetni", "admin", PASSWORD)
-        yield repo
+        if request.param == "aws":
+            monkeypatch.delenv("DATA_DIR", raising=False)
+            repository = _aws_repo(monkeypatch)
+        else:
+            monkeypatch.setenv("DATA_DIR", str(tmp_path))
+            monkeypatch.setenv("SMTP_HOST", "smtp.example.com")
+            monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
+            FakeSMTP.sent = []
+            repository = LocalRepository(tmp_path)
+        monkeypatch.setattr(app, "_repo", repository)
+        monkeypatch.setattr(mailer, "_repo", repository)
+        create_user(repository, "Ucetni", "admin", PASSWORD)
+        yield repository
+
+
+def deliver_queued(repo):
+    """Run the e-mail worker for everything queued so far."""
+    if isinstance(repo, LocalRepository):
+        while not repo.mail_queue.empty():
+            mailer.send_one(*repo.mail_queue.get())
+        return
+    sqs = boto3.client("sqs")
+    queue_url = sqs.get_queue_url(QueueName="payslips")["QueueUrl"]
+    messages = sqs.receive_message(QueueUrl=queue_url, MaxNumberOfMessages=10)["Messages"]
+    records = [{"messageId": m["MessageId"], "body": m["Body"]} for m in messages]
+    assert mailer.handler({"Records": records}) == {"batchItemFailures": []}
 
 
 class Client:
     def __init__(self) -> None:
         self.cookies: dict[str, str] = {}
 
-    def request(self, method, path, body=None, query=None, csrf=True):
+    def request(self, method, path, body=None, query=None, csrf=True, raw=None):
         headers = {"content-type": "application/json"}
         if csrf:
             headers["x-requested-with"] = "payroll"
+        url = urlparse(path)
+        if url.query:
+            query = dict(parse_qsl(url.query))
         event = {
-            "rawPath": path,
+            "rawPath": url.path,
             "requestContext": {"http": {"method": method}},
             "headers": headers,
             "queryStringParameters": query,
             "cookies": [f"{k}={v}" for k, v in self.cookies.items()],
-            "body": json.dumps(body) if body is not None else None,
-            "isBase64Encoded": False,
+            "body": base64.b64encode(raw).decode()
+            if raw is not None
+            else json.dumps(body)
+            if body is not None
+            else None,
+            "isBase64Encoded": raw is not None,
         }
         response = app.handler(event)
         for cookie in response.get("cookies", []):
             name, _, rest = cookie.partition("=")
             self.cookies[name] = rest.split(";")[0]
+        if response.get("isBase64Encoded"):
+            return response["statusCode"], base64.b64decode(response["body"]), response["headers"]
         return response["statusCode"], json.loads(response["body"])
 
     def get(self, path, **kw):
@@ -87,7 +148,7 @@ class Client:
 
 
 @pytest.fixture
-def client(aws):
+def client(repo):
     c = Client()
     status, _ = c.post("/api/auth/login", {"username": "ucetni", "password": PASSWORD})
     assert status == 200
@@ -140,12 +201,12 @@ def upload(client, sample_abo, period="2026-10"):
     )
 
 
-def test_requires_login(aws):
+def test_requires_login(repo):
     status, body = Client().get("/api/employees")
     assert status == 401
 
 
-def test_login_lockout(aws):
+def test_login_lockout(repo):
     c = Client()
     for _ in range(5):
         status, _ = c.post("/api/auth/login", {"username": "ucetni", "password": "wrong"})
@@ -154,7 +215,7 @@ def test_login_lockout(aws):
     assert status == 429
 
 
-def test_login_unknown_user(aws):
+def test_login_unknown_user(repo):
     status, _ = Client().post("/api/auth/login", {"username": "nobody", "password": "x"})
     assert status == 401
 
@@ -187,7 +248,7 @@ def test_employee_validation(client):
     assert status == 400 and "already used" in body["error"]
 
 
-def test_full_salary_flow(client, aws, sample_abo):
+def test_full_salary_flow(client, repo, sample_abo):
     ids = setup_registry(client)
 
     status, body = upload(client, sample_abo)
@@ -224,13 +285,19 @@ def test_full_salary_flow(client, aws, sample_abo):
     assert outputs["pension"] == {**outputs["pension"], "count": 2, "total": 250_000}
     assert batch["salaries_by_employee"] == {ids[0]: 3_200_000, ids[1]: 2_500_000}
 
-    deductions = aws.get_file(outputs["deductions"]["key"]).decode()
+    deductions = repo.get_file(outputs["deductions"]["key"]).decode()
     assert "2 000000-1000000005 00000001850000 191126" in deductions
 
     status, body = client.get("/api/batches/2026-10/outputs/salaries/download")
     assert status == 200
-    query = parse_qs(urlparse(body["url"]).query)
-    assert "15_mzdy_2026-10" in query["response-content-disposition"][0]
+    if isinstance(repo, LocalRepository):
+        status, data, headers = Client().get(body["url"])
+        assert status == 200
+        assert data == repo.get_file(outputs["salaries"]["key"])
+        assert "15_mzdy_2026-10.kpc" in headers["Content-Disposition"]
+    else:
+        query = parse_qs(urlparse(body["url"]).query)
+        assert "15_mzdy_2026-10" in query["response-content-disposition"][0]
 
     for group in ("salaries", "deductions", "pension"):
         status, batch = client.post(f"/api/batches/2026-10/outputs/{group}/uploaded")
@@ -275,7 +342,7 @@ def test_invalid_period(client):
     assert client.get("/api/batches/2026-13")[0] == 400
 
 
-def test_payslips_flow(client, aws, sample_abo):
+def test_payslips_flow(client, repo, sample_abo):
     ids = setup_registry(client)
     upload(client, sample_abo)
 
@@ -285,7 +352,13 @@ def test_payslips_flow(client, aws, sample_abo):
     assert status == 200
     key = body["key"]
     pdf = make_pdf(["Osobni cislo: 1001", "Osobni cislo: 1002", "strana 2"])
-    aws.put_file(key, pdf, "application/pdf")
+    if isinstance(repo, LocalRepository):
+        # Upload through the signed URL, without a session cookie or CSRF header.
+        status, _ = Client().request("PUT", body["url"], raw=pdf, csrf=False)
+        assert status == 200
+        assert repo.get_file(key) == pdf
+    else:
+        repo.put_file(key, pdf, "application/pdf")
 
     status, body = client.post("/api/batches/2026-10/payslips/process", {"key": key})
     assert status == 200, body
@@ -299,11 +372,12 @@ def test_payslips_flow(client, aws, sample_abo):
     assert status == 200
     assert sorted(body["queued"]) == sorted(ids)
 
-    sqs = boto3.client("sqs")
-    queue_url = sqs.get_queue_url(QueueName="payslips")["QueueUrl"]
-    messages = sqs.receive_message(QueueUrl=queue_url, MaxNumberOfMessages=10)["Messages"]
-    records = [{"messageId": m["MessageId"], "body": m["Body"]} for m in messages]
-    assert mailer.handler({"Records": records}) == {"batchItemFailures": []}
+    deliver_queued(repo)
+    if isinstance(repo, LocalRepository):
+        assert sorted(m["To"] for m in FakeSMTP.sent) == [
+            "Eva Svobodová <eva@example.com>",
+            "Jan Novák <jan@example.com>",
+        ]
 
     status, body = client.get("/api/batches/2026-10/payslips")
     assert {p["status"] for p in body["payslips"]} == {"sent"}
@@ -359,3 +433,27 @@ def test_settings_account_conflicts(client):
         },
     )
     assert status == 400 and "configured in settings" in response["error"]
+
+
+def test_signed_file_urls(repo, tmp_path):
+    if not isinstance(repo, LocalRepository):
+        pytest.skip("signed /api/files URLs exist only for local storage")
+    repo.put_file("batches/2026-10/output/x.kpc", b"data", "text/plain")
+    url = repo.download_url("batches/2026-10/output/x.kpc", "x.kpc")
+    assert Client().get(url)[:2] == (200, b"data")
+    # Tampering with any parameter invalidates the signature.
+    assert Client().get(url.replace("x.kpc", "y.kpc"))[0] == 403
+    assert Client().request("PUT", url, raw=b"evil", csrf=False)[0] == 403
+    assert Client().get("/api/files?key=batches/2026-10/output/x.kpc")[0] == 403
+    with pytest.raises(ValueError):
+        repo.put_file("../escape", b"x", "text/plain")
+
+
+def test_send_requires_smtp(client, repo, sample_abo, monkeypatch):
+    if not isinstance(repo, LocalRepository):
+        pytest.skip("SES needs no extra configuration")
+    setup_registry(client)
+    upload(client, sample_abo)
+    monkeypatch.delenv("SMTP_HOST")
+    status, body = client.post("/api/batches/2026-10/payslips/send")
+    assert status == 400 and "SMTP" in body["error"]
