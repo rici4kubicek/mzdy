@@ -119,3 +119,43 @@ def test_write_subset_copies_lines_and_rewrites_headers(sample_abo):
         "5 +",
         "",
     ]
+
+
+# Shape of a real Pohoda export: no zero padding of accounts or amounts, no specific
+# symbol on most lines, no messages, empty client name. Accounts are made up.
+POHODA_ABO = (
+    "UHL1130426                    0000000000000000000000000000\r\n"
+    "1 1501 000000 0300\r\n"
+    "2 1000000005 3500000 200426\r\n"
+    "1000000056 300000 24694631 07101148\r\n"
+    "1000000013 3200000 0326 08000138\r\n"
+    "27-1840220297 0 900011111 01000558\r\n"
+    "1000000021 0 2030661367 01000558 6606010686\r\n"
+    "3 +\r\n"
+    "5 +\r\n"
+)
+
+
+def test_parse_pohoda_export():
+    f = abo.parse(POHODA_ABO)
+    assert f.header.client_name == ""
+    assert f.groups[0].payer == AccountNumber("", "1000000005")
+    assert f.groups[0].total == f.groups[0].items_total == 3_500_000
+    salary = f.items[1]
+    assert salary.payee == BankAccount.parse("1000000013/0800")
+    assert (salary.amount, salary.vs, salary.ks, salary.ss) == (3_200_000, "326", "138", "")
+    assert f.items[3].ss == "6606010686"
+
+
+def test_write_subset_keeps_pohoda_style():
+    source = abo.parse(POHODA_ABO)
+    group = source.groups[0]
+    data = abo.write_subset(
+        source, [(group, [(group.items[1], "AV: x NP: y")])], date(2026, 4, 15), date(2026, 4, 14)
+    )
+    assert data.decode("ascii").split("\r\n")[:4] == [
+        "UHL1140426                    0000000000000000000000000000",
+        "1 1501 000000 0300",
+        "2 1000000005 3200000 150426",
+        "1000000013 3200000 0326 08000138 AV: x NP: y",
+    ]

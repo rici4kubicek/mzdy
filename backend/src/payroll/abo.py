@@ -315,7 +315,9 @@ def serialize(abo: AboFile) -> bytes:
 def _group_header_line(raw: str, total: int, due_date: date) -> str:
     """The original group header with the total and due date replaced."""
     tokens = raw.split()
-    tokens[-2] = str(total).zfill(len(tokens[-2]))
+    # Keep the input's style: zero-padded to a fixed width, or plain (as Pohoda writes it).
+    padded = tokens[-2].startswith("0")
+    tokens[-2] = str(total).zfill(len(tokens[-2])) if padded else str(total)
     tokens[-1] = due_date.strftime("%d%m%y")
     return " ".join(tokens)
 
